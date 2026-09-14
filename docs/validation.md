@@ -7,9 +7,20 @@ with Node.js 24.4.1.
 ## Completed
 
 - TypeScript type checking and production compilation pass.
-- 49 automated tests pass across scheduling, quotas, native event contracts,
+- 68 automated tests pass across scheduling, quotas, native event contracts,
   hooks, CLI operations, durable recovery, and actual child-process execution.
 - Both native subscription account checks work.
+- Claude authentication probes in an isolated project confirm that invocation
+  settings override project Bedrock routing and API-key helpers. These checks
+  did not start model turns.
+- Codex 0.153.0 metadata queries in an isolated native home confirm the hook
+  event names, canonical source paths, global enablement, and untrusted status
+  used by the health check. No hooks were approved or executed by this check.
+- Fake Codex child processes exercise the native account handshake, successful
+  retries, usage-limit interruptions, handoffs, and continuation in the same
+  session. Missing terminal results and invalid final messages hold their slots.
+- Controlled child-process barriers verify that disabling a skill during a
+  quota probe or worker authentication prevents its execution.
 - Both real providers returned measured weekly quota. Codex supplied identity
   in its snapshot. Claude required pinning the helper's executable and checking
   that executable's login before and after quota collection.
@@ -30,8 +41,6 @@ part of the source distribution or npm package.
 
 ## Release checks still open
 
-- Automated Codex child-process regression coverage for account handshake,
-  same-session continuation, and failures after a valid-looking outcome.
 - A real prospect brief reviewed for usefulness and citation quality.
 - Starport preview preparation in an authorized isolated checkout, reviewed
   through its existing human approval boundary.

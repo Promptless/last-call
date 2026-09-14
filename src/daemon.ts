@@ -1,7 +1,7 @@
 import { errorMessage, loadConfig } from './files.js';
 import { Store } from './store.js';
 import { readQuotas } from './providers.js';
-import { admit, closeSprints, eligibility } from './scheduler.js';
+import { admit, closeSprints, eligibility, sprintFor } from './scheduler.js';
 import { activityHealth } from './activity.js';
 import { launchWorker, reconcileRuns } from './runner.js';
 import { acquireLease, KeepAwake, notify, requireMac } from './macos.js';
@@ -21,8 +21,8 @@ export function receiptSummary(runs: Run[]): Record<string, number> {
   };
 }
 
-export function statusSnapshot(store: Store, config: Config, readings: Partial<Record<Provider, QuotaReading>>, now = Date.now()): Record<string, unknown> {
-  const health = activityHealth(config, store, now);
+export async function statusSnapshot(store: Store, config: Config, readings: Partial<Record<Provider, QuotaReading>>, now = Date.now()): Promise<Record<string, unknown>> {
+  const health = await activityHealth(config, store, now);
   const decision = eligibility(config, readings, health, store, now);
   const held = store.held();
   const reasons = [...decision.reasons];
@@ -36,7 +36,8 @@ export function statusSnapshot(store: Store, config: Config, readings: Partial<R
     if (held.filter(r => r.skillId === skill.id).length >= skill.maxConcurrent) reasons.push(`${skill.id}: Concurrency limit reached`);
     const last = store.get<number>('launch', skill.id);
     if (last !== undefined && now - last < skill.spacingSeconds * 1000) reasons.push(`${skill.id}: Waiting for launch spacing`);
-    if (decision.candidates.filter(c => skill.providers.includes(c.provider)).every(c => store.get<boolean>('empty', `${skill.id}:${c.sprint.id}`))) reasons.push(`${skill.id}: No eligible work/provider; use skill recheck after adding work`);
+    const candidates = decision.candidates.filter(c => skill.providers.includes(c.provider));
+    if (candidates.length && candidates.every(c => store.get<boolean>('empty', `${skill.id}:${c.sprint.id}`))) reasons.push(`${skill.id}: No work remains; use skill recheck after adding work`);
     const check = checkSkill(skill);
     if (!check.valid) reasons.push(`${skill.id}: ${check.findings.filter(f => f.severity === 'error').map(f => f.message).join('; ')}`);
   }
@@ -70,18 +71,21 @@ export async function daemon(home: string, entry: string, once = false): Promise
     do {
       let delay = 60_000;
       try {
+        const readings = await readQuotas(loadConfig(home), home);
+        const checkedConfig = loadConfig(home);
+        let health = await activityHealth(checkedConfig, store);
         const config = loadConfig(home); delay = config.pollSeconds * 1000;
-        const readings = await readQuotas(config, home);
+        if (JSON.stringify(checkedConfig) !== JSON.stringify(config)) health = { ready: false, reason: 'Configuration changed during checks; refreshing before the next launch' };
         store.put('setting', 'readings', readings);
         reconcileRuns(store);
         closeSprints(store, readings, Date.now());
-        const decision = eligibility(config, readings, activityHealth(config, store), store, Date.now());
+        const decision = eligibility(config, readings, health, store, Date.now());
         const validConfig = { ...config, skills: config.skills.filter(skill => checkSkill(skill).valid) };
         if (!stopping) {
           const run = admit(store, validConfig, decision.candidates, Date.now());
           if (run) launchWorker(home, run, entry);
         }
-        const sprintActive = decision.candidates.length > 0 || store.held().some(r => r.state === 'running');
+        const sprintActive = hasOpenWork(store, config, readings);
         await awake.update(config.keepAwake, sprintActive);
         await sendNotifications(store, config);
         store.delete('setting', 'schedulerError');
@@ -98,4 +102,10 @@ export async function daemon(home: string, entry: string, once = false): Promise
     store.transaction(() => { if (store.get<{ pid: number }>('setting', 'lease')?.pid === lease.pid) store.delete('setting', 'lease'); });
     store.close();
   }
+}
+
+export function hasOpenWork(store: Store, config: Config, readings: Partial<Record<Provider, QuotaReading>>, now = Date.now()): boolean {
+  return store.sprints().some(s => s.closedAt === undefined && s.deadline > now) ||
+    store.held().some(r => r.state === 'running' || r.state === 'launching') ||
+    Object.values(readings).some(reading => reading.quota && 'sprint' in sprintFor(config, store, reading.quota, now));
 }

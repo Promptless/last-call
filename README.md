@@ -32,7 +32,9 @@ and a companion skill for both agents. It leaves the scheduler disabled.
 
 Open fresh native sessions after installing activity hooks. Review and trust
 the Codex hooks if prompted; Last Call waits until it observes real lifecycle
-events. Existing sessions may need restarting to load changed hook settings.
+events. It also checks native Codex hook enablement and trust in your home and
+registered working directories. `status` identifies hooks that need attention
+in `/hooks`. Existing sessions may need restarting to load changed hook settings.
 
 ```sh
 lastcall doctor
@@ -146,9 +148,13 @@ basis explicitly. An unused
 short-term window can omit its reset time; a used window cannot.
 
 The CLI uses subscription authentication and removes inherited API credential
-overrides from native runner environments. It does not buy credits, enable
-overage, or switch to API billing. A skill's own API calls, cloud services, and
-other external tools may have separate costs and permissions.
+overrides from native runner environments. Claude authentication is checked in
+the skill's working directory, with the same subscription settings used for
+execution. Those settings override project API helpers and cloud-provider
+routing; an effective API key or non-subscription login blocks the run. Last
+Call does not buy credits, enable overage, or switch to API billing. A skill's
+own API calls, cloud services, and other external tools may have separate costs
+and permissions.
 
 Activity hooks store session IDs, timestamps, ownership and turn state; they
 discard prompt and tool content. Hook installation preserves other handlers.
@@ -157,10 +163,20 @@ outcomes hold their slots for inspection instead of rerunning external actions.
 An uncertain run requires `answer --after-inspection` after checking for any
 surviving native execution. A normal answer does not bypass this check.
 
+Codex retry diagnostics appear in run receipts. Successful retries can complete
+normally. Only a recognized native usage-limit failure automatically queues the
+same session for continuation; other failures keep their slots for inspection.
+
 Keep-awake is off by default. When enabled, it prevents idle sleep on AC power
-while a sprint or execution is active. It does not wake a sleeping Mac or keep
-a closed laptop awake. Desktop notifications cover sprint closure and required
-attention; macOS notification settings control their delivery.
+while a sprint or execution is active, including waits for short-term quota to
+return. It does not wake a sleeping Mac or keep a closed laptop awake. Desktop
+notifications cover sprint closure and required attention; macOS notification
+settings control their delivery.
+
+Service installation preserves the `CODEX_HOME` and `CLAUDE_CONFIG_DIR` selected
+in your shell. To use different native configuration directories, run
+`lastcall service enable` with those environment variables set. Service removal
+requires the exact Last Call installation directory stored in its arguments.
 
 ```sh
 lastcall uninstall

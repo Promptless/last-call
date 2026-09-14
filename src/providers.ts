@@ -2,11 +2,11 @@ import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { z } from 'zod';
 import { AccountSchema, type Account, type Config, type Provider, type Quota, type QuotaReading, type Window } from './model.js';
-import { capture, findBinary, subscriptionEnv } from './process.js';
+import { capture, CLAUDE_SUBSCRIPTION_SETTINGS, findBinary, subscriptionEnv } from './process.js';
 import { errorMessage } from './files.js';
 
 const object = z.record(z.string(), z.unknown());
-const nativeClaudeAccount = z.object({ loggedIn: z.literal(true), authMethod: z.literal('claude.ai'), apiProvider: z.literal('firstParty'), email: z.string().email(), orgName: z.string().optional() });
+const nativeClaudeAccount = z.object({ loggedIn: z.literal(true), authMethod: z.literal('claude.ai'), apiProvider: z.literal('firstParty'), apiKeySource: z.null().optional(), email: z.string().email(), orgName: z.string().optional() });
 
 /** Compare all account identity fields captured from a native subscription login. */
 export function accountsMatch(expected: Account, actual: Account): boolean {
@@ -14,42 +14,56 @@ export function accountsMatch(expected: Account, actual: Account): boolean {
 }
 
 /** Query the native account without reading or copying its credentials. */
-export async function nativeAccount(provider: Provider, binary: string, home?: string): Promise<Account> {
+export async function nativeAccount(provider: Provider, binary: string, home?: string, cwd?: string): Promise<Account> {
   if (provider === 'claude') {
-    const result = await capture(binary, ['auth', 'status', '--json'], { env: subscriptionEnv(home) });
+    const result = await capture(binary, ['--settings', JSON.stringify(CLAUDE_SUBSCRIPTION_SETTINGS), 'auth', 'status', '--json'], { env: subscriptionEnv(home), cwd });
     if (result.code) throw new Error('Claude authentication check failed; run claude auth login.');
     const account = nativeClaudeAccount.parse(JSON.parse(result.stdout));
     return { email: account.email, organization: account.orgName };
   }
-  // Stable account/read handshake: https://learn.chatgpt.com/docs/app-server#authentication
+  const [response] = await codexRequests(binary, [{ method: 'account/read', params: { refreshToken: false } }], { home, cwd });
+  const result = z.object({ account: z.object({ type: z.literal('chatgpt'), email: z.string().email() }) }).parse(response);
+  return { email: result.account.email };
+}
+
+/** Read native metadata without starting a model turn or exposing credentials. */
+export function codexRequests(binary: string, requests: { method: string; params: unknown }[], options: { home?: string; cwd?: string } = {}): Promise<unknown[]> {
+  // https://learn.chatgpt.com/docs/app-server — initialize, then read-only RPCs.
   return new Promise((resolve, reject) => {
-    const child = spawn(binary, ['app-server'], { env: subscriptionEnv(home), stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn(binary, ['app-server'], { cwd: options.cwd, env: subscriptionEnv(options.home), stdio: ['pipe', 'pipe', 'pipe'] });
     let done = false;
-    const finish = (error?: Error, account?: Account): void => {
+    const results = new Map<number, unknown>();
+    const finish = (error?: Error): void => {
       if (done) return; done = true; clearTimeout(timer); lines.close(); child.kill('SIGTERM');
-      if (error) reject(error); else resolve(account!);
+      const escalation = setTimeout(() => child.kill('SIGKILL'), 1000); escalation.unref();
+      child.once('close', () => clearTimeout(escalation));
+      if (error) reject(error); else resolve(requests.map((_, index) => results.get(index + 2)));
     };
-    const timer = setTimeout(() => finish(new Error('Codex account/read timed out')), 20_000);
+    const timer = setTimeout(() => finish(new Error('Codex metadata request timed out')), 20_000);
     const lines = createInterface({ input: child.stdout });
     child.stderr.resume();
     child.on('error', error => finish(error));
-    child.on('exit', () => { if (!done) finish(new Error('Codex exited before returning its account')); });
+    child.on('exit', () => { if (!done) finish(new Error('Codex exited before returning metadata')); });
     child.stdin.on('error', error => finish(error));
     lines.on('line', line => {
       try {
         const message = object.parse(JSON.parse(line));
-        if (message.error) { finish(new Error('Codex account request was rejected')); return; }
+        if (message.id === undefined) return;
+        if (message.error) { finish(new Error('Codex metadata request was rejected')); return; }
         if (message.id === 1) {
           child.stdin.write(JSON.stringify({ method: 'initialized', params: {} }) + '\n');
-          child.stdin.write(JSON.stringify({ method: 'account/read', id: 2, params: { refreshToken: false } }) + '\n');
+          requests.forEach((request, index) => child.stdin.write(JSON.stringify({ ...request, id: index + 2 }) + '\n'));
+          if (!requests.length) finish();
+          return;
         }
-        if (message.id === 2) {
-          const result = z.object({ account: z.object({ type: z.literal('chatgpt'), email: z.string().email() }) }).parse(message.result);
-          finish(undefined, { email: result.account.email });
+        if (typeof message.id === 'number' && message.id >= 2 && message.id < requests.length + 2) {
+          if (!('result' in message)) throw new Error('Missing response result');
+          results.set(message.id, message.result);
+          if (results.size === requests.length) finish();
         }
-      } catch (error) { finish(new Error(`Invalid Codex subscription account: ${errorMessage(error)}`)); }
+      } catch (error) { finish(new Error(`Invalid Codex metadata: ${errorMessage(error)}`)); }
     });
-    child.stdin.write(JSON.stringify({ method: 'initialize', id: 1, params: { clientInfo: { name: 'lastcall', title: 'Last Call', version: '0.1.0' } } }) + '\n');
+    child.stdin.write(JSON.stringify({ method: 'initialize', id: 1, params: { clientInfo: { name: 'lastcall', title: 'Last Call', version: '0.1.0' }, capabilities: { experimentalApi: true } } }) + '\n');
   });
 }
 

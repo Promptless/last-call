@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { z } from 'zod';
 import { OutcomeSchema, type Outcome, type Provider, type Run } from './model.js';
 import { atomicJson, errorMessage, loadConfig } from './files.js';
-import { findBinary, processIdentity, subscriptionEnv } from './process.js';
+import { CLAUDE_SUBSCRIPTION_SETTINGS, findBinary, processIdentity, subscriptionEnv } from './process.js';
 import { Store } from './store.js';
 import { accountsMatch, nativeAccount } from './providers.js';
 
@@ -27,7 +27,7 @@ export function runnerArgs(run: Run, schemaPath: string): string[] {
   if (run.provider === 'claude') {
     const permission = run.skill.claude!;
     // https://code.claude.com/docs/en/headless — keep normal subscription auth; --bare is API-only.
-    const args = ['-p', '--verbose', '--output-format', 'stream-json', '--json-schema', JSON.stringify(RESULT_SCHEMA), '--permission-mode', permission.permissionMode, '--permission-prompts', 'none', '--settings', JSON.stringify({ forceLoginMethod: 'claudeai' })];
+    const args = ['-p', '--verbose', '--output-format', 'stream-json', '--json-schema', JSON.stringify(RESULT_SCHEMA), '--permission-mode', permission.permissionMode, '--permission-prompts', 'none', '--settings', JSON.stringify(CLAUDE_SUBSCRIPTION_SETTINGS)];
     if (permission.allowedTools.length) args.push('--allowedTools', ...permission.allowedTools);
     if (permission.model) args.push('--model', permission.model);
     if (run.sessionId) args.push('--resume', run.sessionId);
@@ -47,7 +47,7 @@ export function runnerArgs(run: Run, schemaPath: string): string[] {
 }
 
 const EventSchema = z.object({ type: z.string() }).passthrough();
-export interface ParsedEvent { sessionId?: string; outcome?: Outcome; quotaLimited?: boolean; failure?: string }
+export interface ParsedEvent { sessionId?: string; outcome?: Outcome | null; completed?: boolean; quotaLimited?: boolean; failure?: string; diagnostic?: string }
 export function parseEvent(provider: Provider, value: unknown): ParsedEvent {
   const event = EventSchema.parse(value);
   const result: ParsedEvent = {};
@@ -65,15 +65,20 @@ export function parseEvent(provider: Provider, value: unknown): ParsedEvent {
     if (event.type === 'thread.started' && typeof event.thread_id === 'string') result.sessionId = event.thread_id;
     if (event.type === 'item.completed') {
       const item = z.object({ type: z.string(), text: z.string().optional() }).passthrough().parse(event.item);
-      if (item.type === 'agent_message' && item.text) {
-        const decoded = tryOutcome(item.text);
-        if (decoded) result.outcome = decoded;
+      if (item.type === 'agent_message') {
+        result.outcome = tryOutcome(z.string().parse(item.text)) ?? null;
       }
     }
-    if (event.type === 'turn.failed' || event.type === 'error') {
-      const error = z.object({ code: z.string().optional(), message: z.string().optional() }).passthrough().safeParse(event.error);
-      if (error.success && ['usage_limit_reached', 'rate_limit_exceeded'].includes(error.data.code ?? '')) result.quotaLimited = true;
-      result.failure = error.success ? error.data.message ?? 'Codex turn failed' : 'Codex turn failed';
+    // codex exec emits message-only errors; top-level errors can precede a
+    // successful retry. Only turn.failed is terminal.
+    // https://learn.chatgpt.com/docs/non-interactive-mode#make-output-machine-readable
+    if (event.type === 'error') result.diagnostic = z.string().parse(event.message);
+    if (event.type === 'turn.completed') result.completed = true;
+    if (event.type === 'turn.failed') {
+      const error = z.object({ message: z.string() }).parse(event.error);
+      result.failure = error.message;
+      // Exact native usage-limit prefix, never a substring in model/tool prose.
+      if (/^You've hit your usage limit(?:\.| for )/.test(error.message)) result.quotaLimited = true;
     }
   }
   return result;
@@ -112,8 +117,12 @@ export async function runWorker(home: string, id: string): Promise<void> {
     const selected = config.providers[run.provider];
     if (!selected || !accountsMatch(run.account, selected.account)) throw new Error('Configured account differs from the account that owns this run');
     const binary = findBinary(selected.binary);
-    const account = await nativeAccount(run.provider, binary, home);
+    const account = await nativeAccount(run.provider, binary, home, run.skill.cwd);
     if (!accountsMatch(run.account, account)) throw new Error('Native account changed before execution');
+    const currentConfig = loadConfig(home);
+    if (!currentConfig.skills.some(skill => skill.id === run.skillId && skill.enabled)) throw new Error('Skill was disabled or removed before execution');
+    const currentProvider = currentConfig.providers[run.provider];
+    if (!currentProvider || currentProvider.binary !== selected.binary || !accountsMatch(run.account, currentProvider.account)) throw new Error('Provider configuration changed before execution');
     const directory = join(home, 'runs', id);
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     const schema = join(directory, 'result.schema.json'); atomicJson(schema, RESULT_SCHEMA);
@@ -125,6 +134,9 @@ export async function runWorker(home: string, id: string): Promise<void> {
     let outcome: Outcome | undefined;
     let quotaLimited = false;
     let nonQuotaFailure = false;
+    let completed = false;
+    const diagnostics: string[] = [];
+    store.updateRun(id, { diagnostics });
     let failure: string | undefined;
     child.stdin.on('error', error => { failure = `Could not deliver input to native runner: ${errorMessage(error)}`; nonQuotaFailure = true; });
     const lines = createInterface({ input: child.stdout });
@@ -135,7 +147,13 @@ export async function runWorker(home: string, id: string): Promise<void> {
           store.updateRun(id, { sessionId: event.sessionId });
           store.put('owned', `${run.provider}:${event.sessionId}`, true);
         }
-        if (event.outcome) outcome = event.outcome;
+        if (event.outcome !== undefined) outcome = event.outcome ?? undefined;
+        if (event.completed) completed = true;
+        if (event.diagnostic) {
+          diagnostics.push(event.diagnostic.slice(0, 2048));
+          if (diagnostics.length > 10) diagnostics.shift();
+          store.updateRun(id, { diagnostics: [...diagnostics] });
+        }
         if (event.quotaLimited) quotaLimited = true;
         if (event.failure) {
           if (!nonQuotaFailure) failure = event.failure;
@@ -153,6 +171,7 @@ export async function runWorker(home: string, id: string): Promise<void> {
     });
     child.stdin.end(invocation(run));
     await completion;
+    if (run.provider === 'codex' && !completed && !failure) failure = 'Codex exited without a terminal turn result. Inspect the session before resuming.';
     finishRun(store, id, outcome, quotaLimited && !nonQuotaFailure, failure);
   } catch (error) {
     const run = store.get<Run>('run', id);
