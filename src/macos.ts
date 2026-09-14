@@ -1,30 +1,38 @@
-import { spawn, type ChildProcess } from 'node:child_process';
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createHash } from 'node:crypto';
+import { z } from 'zod';
 import { capture, processIdentity } from './process.js';
 import { Store } from './store.js';
 import { errorMessage } from './files.js';
 
 export const SERVICE_LABEL = 'io.lastcall.scheduler';
 const xml = (value: string): string => value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&apos;');
-export function servicePlist(home: string, entry: string, path: string): string {
+export function servicePlist(home: string, entry: string, path: string, env: NodeJS.ProcessEnv = process.env): string {
   const args = [process.execPath, entry, '--home', home, '_daemon'];
+  const environment = { PATH: path, CODEX_HOME: env.CODEX_HOME ?? join(homedir(), '.codex'), CLAUDE_CONFIG_DIR: env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude') };
   return `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict>
 <key>Label</key><string>${SERVICE_LABEL}</string>
 <key>ProgramArguments</key><array>${args.map(arg => `<string>${xml(arg)}</string>`).join('')}</array>
-<key>EnvironmentVariables</key><dict><key>PATH</key><string>${xml(path)}</string></dict>
+<key>EnvironmentVariables</key><dict>${Object.entries(environment).map(([key, value]) => `<key>${key}</key><string>${xml(value)}</string>`).join('')}</dict>
 <key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>30</integer>
 <key>StandardOutPath</key><string>${xml(join(home, 'service.log'))}</string>
 <key>StandardErrorPath</key><string>${xml(join(home, 'service.log'))}</string>
 </dict></plist>\n`;
 }
 export function requireMac(): void { if (process.platform !== 'darwin') throw new Error('Background service and setup require macOS.'); }
+export function assertServiceHome(path: string, home: string): void {
+  const output = execFileSync('/usr/bin/plutil', ['-extract', 'ProgramArguments', 'json', '-o', '-', '--', path], { encoding: 'utf8' });
+  const args = z.array(z.string()).parse(JSON.parse(output));
+  const index = args.indexOf('--home');
+  if (index < 0 || args[index + 1] !== home) throw new Error('The service belongs to another Last Call home');
+}
 export async function enableService(home: string, entry: string): Promise<void> {
   requireMac();
   const path = join(homedir(), 'Library', 'LaunchAgents', `${SERVICE_LABEL}.plist`);
-  if (existsSync(path) && !readFileSync(path, 'utf8').includes(xml(home))) throw new Error('A Last Call service already belongs to a different installation. Disable that service first.');
+  if (existsSync(path)) assertServiceHome(path, home);
   const domain = `gui/${process.getuid!()}`;
   await disableService(home);
   mkdirSync(dirname(path), { recursive: true });
@@ -38,7 +46,7 @@ export async function disableService(home: string): Promise<void> {
   requireMac();
   const path = join(homedir(), 'Library', 'LaunchAgents', `${SERVICE_LABEL}.plist`);
   if (!existsSync(path)) return;
-  if (!readFileSync(path, 'utf8').includes(xml(home))) throw new Error('The service belongs to another Last Call home');
+  assertServiceHome(path, home);
   const domain = `gui/${process.getuid!()}/${SERVICE_LABEL}`;
   const loaded = await capture('/bin/launchctl', ['print', domain]);
   if (!loaded.code) {

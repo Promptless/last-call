@@ -8,16 +8,40 @@ export interface Decision { candidates: Candidate[]; reasons: string[] }
 // Claude's terminal countdown can round the same reset to adjacent minutes.
 export function samePeriod(left: number, right: number): boolean { return Math.abs(left - right) <= 5 * 60_000; }
 
-export function quotaReason(quota: Quota, config: Config, now: number): string | undefined {
+function quotaSnapshotReason(quota: Quota, config: Config, now: number): string | undefined {
   const expected = config.providers[quota.provider]?.account;
   if (!expected || !accountsMatch(expected, quota.account)) return 'Account does not match the configured native account';
   if (now - quota.updatedAt > config.quotaMaxAgeSeconds * 1000 || quota.updatedAt > now + 30_000 || now - quota.fetchedAt > config.quotaMaxAgeSeconds * 1000) return 'Quota snapshot is stale';
   if (quota.weekly.resetsAt <= now) return 'Waiting for a fresh weekly period';
+  return undefined;
+}
+
+export function quotaReason(quota: Quota, config: Config, now: number): string | undefined {
+  const invalid = quotaSnapshotReason(quota, config, now);
+  if (invalid) return invalid;
   if (100 - quota.weekly.usedPercent <= config.reservePercent) return 'Weekly reserve reached';
   const windows = [quota.shortTerm, ...quota.extra].filter(w => w !== undefined);
   if (windows.some(w => w.resetsAt <= now)) return 'Waiting for refreshed short-term or model limits';
   if (windows.some(w => w.usedPercent >= 100)) return 'Short-term or model allowance exhausted';
   return undefined;
+}
+
+/** Resolve sprint timing independently of capacity, including waits before the first launch. */
+export function sprintFor(config: Config, store: Store, quota: Quota, now: number): { sprint: Sprint } | { reason: string } {
+  const invalid = quotaSnapshotReason(quota, config, now);
+  if (invalid) return { reason: invalid };
+  const provider = quota.provider;
+  const manual = store.get<ManualSprint>('setting', `manual:${provider}`);
+  const manualReset = manual?.resets[provider];
+  const manualApplies = manual && manual.providers.includes(provider) && manualReset !== undefined && samePeriod(manualReset, quota.weekly.resetsAt);
+  if (manualApplies && manual.deadline <= now) return { reason: 'Manual sprint deadline passed' };
+  const deadline = manualApplies ? Math.min(manual.deadline, quota.weekly.resetsAt) : quota.weekly.resetsAt;
+  if (!manualApplies && now < deadline - config.runwayHours * 3_600_000) return { reason: `Outside the ${config.runwayHours}-hour closing window` };
+  const previousPeriod = store.sprints().find(s => s.provider === provider && !s.id.includes(':manual:') && samePeriod(s.resetAt, quota.weekly.resetsAt));
+  const id = manualApplies ? `${provider}:manual:${manual.id}` : previousPeriod?.id ?? `${provider}:${quota.weekly.resetsAt}`;
+  const existing = store.get<Sprint>('sprint', id);
+  if (existing?.closedAt !== undefined) return { reason: 'Sprint closed' };
+  return { sprint: existing ? { ...existing, deadline: Math.min(existing.deadline, deadline) } : { id, provider, resetAt: quota.weekly.resetsAt, deadline, openedAt: now } };
 }
 
 /** Compute eligibility without launching a process or spending quota. */
@@ -26,23 +50,14 @@ export function eligibility(config: Config, readings: Partial<Record<Provider, Q
   const candidates: Candidate[] = [];
   for (const provider of ['claude', 'codex'] as const) {
     if (!config.providers[provider]) continue;
-    const manual = store.get<ManualSprint>('setting', `manual:${provider}`);
     const reading = readings[provider];
     const quota = reading?.quota;
     if (!quota) { reasons.push(`${provider}: ${reading?.error ?? 'Quota unavailable'}`); continue; }
     const reason = quotaReason(quota, config, now);
     if (reason) { reasons.push(`${provider}: ${reason}`); continue; }
-    const manualReset = manual?.resets[provider];
-    const manualApplies = manual && manual.providers.includes(provider) && manualReset !== undefined && samePeriod(manualReset, quota.weekly.resetsAt);
-    if (manualApplies && manual.deadline <= now) { reasons.push(`${provider}: Manual sprint deadline passed`); continue; }
-    const deadline = manualApplies ? Math.min(manual.deadline, quota.weekly.resetsAt) : quota.weekly.resetsAt;
-    if (!manualApplies && now < deadline - config.runwayHours * 3_600_000) { reasons.push(`${provider}: Outside the ${config.runwayHours}-hour closing window`); continue; }
-    const previousPeriod = store.sprints().find(s => s.provider === provider && !s.id.includes(':manual:') && samePeriod(s.resetAt, quota.weekly.resetsAt));
-    const id = manualApplies ? `${provider}:manual:${manual.id}` : previousPeriod?.id ?? `${provider}:${quota.weekly.resetsAt}`;
-    const existing = store.get<Sprint>('sprint', id);
-    if (existing?.closedAt !== undefined) { reasons.push(`${provider}: Sprint closed`); continue; }
-    const sprint: Sprint = existing ? { ...existing, deadline: Math.min(existing.deadline, deadline) } : { id, provider, resetAt: quota.weekly.resetsAt, deadline, openedAt: now };
-    candidates.push({ provider, quota, sprint });
+    const timing = sprintFor(config, store, quota, now);
+    if ('reason' in timing) { reasons.push(`${provider}: ${timing.reason}`); continue; }
+    candidates.push({ provider, quota, sprint: timing.sprint });
   }
   if (!health.ready) return { candidates: [], reasons: [...reasons, health.reason ?? 'Activity detection is not ready'] };
   const activity = store.activities().filter(a => !a.owned);

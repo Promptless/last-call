@@ -55,7 +55,7 @@ export interface Run {
   id: string; skillId: string; provider: Provider; account: Account; skill: Skill; sprintId: string;
   state: RunState; createdAt: number; updatedAt: number; attempt: number;
   sessionId?: string; workerPid?: number; workerIdentity?: string; agentPid?: number; agentIdentity?: string; heartbeatAt?: number;
-  outcome?: Outcome; error?: string; answer?: string; retryAfter?: number; reviewMinutes?: number; useful?: boolean;
+  outcome?: Outcome; error?: string; diagnostics?: string[]; answer?: string; retryAfter?: number; reviewMinutes?: number; useful?: boolean;
 }
 export interface Sprint { id: string; provider: Provider; resetAt: number; deadline: number; openedAt: number; closedAt?: number; notifiedAt?: number }
 export interface ManualSprint { id: string; deadline: number; providers: Provider[]; resets: Partial<Record<Provider, number>> }

@@ -25,6 +25,7 @@ const program = new Command().name('lastcall').description('Your AI quota is exp
 const home = (): string => resolve(String(program.opts().home));
 function output(value: unknown, human?: string): void { process.stdout.write((program.opts().json || !human ? JSON.stringify(value, null, 2) : human) + '\n'); }
 function withStore<T>(fn: (store: Store) => T): T { const store = new Store(home()); try { return fn(store); } finally { store.close(); } }
+async function withStoreAsync<T>(fn: (store: Store) => Promise<T>): Promise<T> { const store = new Store(home()); try { return await fn(store); } finally { store.close(); } }
 function providerList(value: string): Provider[] { return z.array(ProviderSchema).min(1).parse(value.split(',').map(s => s.trim())); }
 function occupiedLine(run: Run): string { return `${run.id}  ${run.provider.padEnd(6)}  ${run.state.padEnd(13)}  ${run.skillId}\n  ${run.error ?? run.outcome?.summary ?? ''}${run.sessionId ? `\n  Native session: ${run.sessionId}` : ''}${run.outcome?.question ? `\n  Question: ${run.outcome.question}` : ''}${run.outcome?.artifacts.length ? `\n  ${run.outcome.artifacts.join('\n  ')}` : ''}`; }
 
@@ -127,7 +128,7 @@ program.command('doctor').description('Check native authentication, measured quo
     try { const result = await capture(binary!, ['--version']); versions[name!] = result.code === 0 ? result.stdout.trim() : `exit ${result.code}`; }
     catch (error) { versions[name!] = errorMessage(error); }
   }
-  withStore(store => { store.put('setting', 'readings', readings); output({ versions, ...statusSnapshot(store, config, readings) }); });
+  await withStoreAsync(async store => { store.put('setting', 'readings', readings); output({ versions, ...await statusSnapshot(store, config, readings) }); });
 });
 
 const provider = program.command('provider').description('Bind native subscription accounts');
@@ -162,9 +163,9 @@ skill.command('recheck <id>').description('Allow an empty skill to look for work
 program.command('status').option('--refresh', 'fetch fresh native quota snapshots').action(async options => {
   const config = loadConfig(home());
   const readings = options.refresh ? await readQuotas(config, home()) : withStore(store => store.get<Partial<Record<Provider, QuotaReading>>>('setting', 'readings') ?? {});
-  withStore(store => {
+  await withStoreAsync(async store => {
     if (options.refresh) store.put('setting', 'readings', readings);
-    const status = statusSnapshot(store, config, readings);
+    const status = await statusSnapshot(store, config, readings);
     const reasons = z.array(z.string()).parse(status.reasons);
     const quotas = Object.entries(readings).map(([p, reading]) => reading.quota ? `${p}: ${100 - reading.quota.weekly.usedPercent}% weekly left; resets ${new Date(reading.quota.weekly.resetsAt).toLocaleString()}` : `${p}: ${reading.error}`).join('\n');
     output(status, `Last Call · ${store.held().length}/${config.slots} slots occupied\n${quotas}\n${reasons.length ? reasons.map(r => `• ${r}`).join('\n') : 'Ready to admit work when the service polls.'}\n\n${store.held().map(occupiedLine).join('\n')}`);

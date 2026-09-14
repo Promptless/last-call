@@ -52,7 +52,9 @@ describe('provider contracts', () => {
     expect(parseEvent('codex', { type: 'thread.started', thread_id: 'def' }).sessionId).toBe('def');
     expect(parseEvent('codex', { type: 'item.completed', item: { type: 'agent_message', text: JSON.stringify(outcome) } }).outcome).toEqual(outcome);
     expect(parseEvent('codex', { type: 'turn.failed', error: { message: 'Someone wrote rate_limit_exceeded in a document' } }).quotaLimited).toBeUndefined();
-    expect(parseEvent('codex', { type: 'turn.failed', error: { code: 'usage_limit_reached' } }).quotaLimited).toBe(true);
+    expect(parseEvent('codex', { type: 'turn.failed', error: { message: "You've hit your usage limit. Try again later." } }).quotaLimited).toBe(true);
+    expect(parseEvent('codex', { type: 'error', message: 'Reconnecting... 1/5' })).toEqual({ diagnostic: 'Reconnecting... 1/5' });
+    expect(parseEvent('codex', { type: 'turn.completed' })).toEqual({ completed: true });
   });
   it('preserves saved-session resumption and explicit native permissions', () => {
     const f = fixture();

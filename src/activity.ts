@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -7,6 +7,7 @@ import { atomicJson, errorMessage, readJson, shellQuote } from './files.js';
 import { type Activity, type Config, type Health, type Provider } from './model.js';
 import { processIdentity } from './process.js';
 import { Store } from './store.js';
+import { codexRequests } from './providers.js';
 
 const RecordSchema = z.record(z.string(), z.unknown());
 export interface HookInstallation { installedAt: number; providers: Partial<Record<Provider, { path: string; command: string; events: string[] }>> }
@@ -83,26 +84,17 @@ function nativeAncestor(): { pid?: number; processIdentity?: string } {
 /** Persist lifecycle metadata only; discard prompt, tool arguments, and transcript content. */
 export function recordActivity(store: Store, provider: Provider, input: unknown, ownedEnvironment: boolean, now = Date.now(), ancestor: { pid?: number; processIdentity?: string } = {}): void {
   const event = HookInputSchema.parse(input);
-  const key = `${provider}:${event.session_id}`;
+  const parentKey = `${provider}:${event.session_id}`;
+  const key = `${provider}:${event.agent_id ?? event.session_id}`;
   const previous = store.get<Activity>('activity', key);
-  const manualTakeover = event.hook_event_name === 'UserPromptSubmit' && !ownedEnvironment &&
+  const manualTakeover = !event.agent_id && event.hook_event_name === 'UserPromptSubmit' && !ownedEnvironment &&
     store.runs().some(run => run.provider === provider && run.sessionId === event.session_id && !['launching', 'running'].includes(run.state));
   if (manualTakeover) store.delete('owned', key);
-  const owned = !manualTakeover && (ownedEnvironment || store.get<boolean>('owned', key) === true || previous?.owned === true);
+  const owned = !manualTakeover && (ownedEnvironment || store.get<boolean>('owned', key) === true || store.get<boolean>('owned', parentKey) === true || previous?.owned === true);
   if (owned) store.put('owned', key, true);
-  if (event.hook_event_name === 'SubagentStart' && event.agent_id) {
-    const childKey = `${provider}:${event.agent_id}`;
-    if (owned) store.put('owned', childKey, true);
-    store.put('activity', childKey, { provider, sessionId: event.agent_id, owned, busy: true, lastAt: now, ...ancestor });
-  }
-  if (event.hook_event_name === 'SubagentStop' && event.agent_id) {
-    const childKey = `${provider}:${event.agent_id}`;
-    const child = store.get<Activity>('activity', childKey);
-    if (child) store.put('activity', childKey, { ...child, busy: false, lastAt: now });
-  }
-  const start = ['UserPromptSubmit', 'PreToolUse', 'PostToolUse'].includes(event.hook_event_name);
-  const stop = ['Stop', 'StopFailure', 'SessionEnd', 'Interrupt'].includes(event.hook_event_name);
-  store.put('activity', key, { provider, sessionId: event.session_id, owned, busy: start || (!stop && (previous?.busy ?? false)), lastAt: now, ...ancestor });
+  const start = ['UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'SubagentStart'].includes(event.hook_event_name);
+  const stop = ['Stop', 'StopFailure', 'SessionEnd', 'Interrupt', 'SubagentStop'].includes(event.hook_event_name);
+  store.put('activity', key, { provider, sessionId: event.agent_id ?? event.session_id, owned, busy: start || (!stop && (previous?.busy ?? false)), lastAt: now, ...ancestor });
   store.put('hookSeen', provider, now);
 }
 
@@ -112,7 +104,7 @@ export function ingestHook(home: string, provider: Provider, input: unknown): vo
   finally { store.close(); }
 }
 
-export function activityHealth(config: Config, store: Store, now = Date.now()): Health {
+export async function activityHealth(config: Config, store: Store, now = Date.now()): Promise<Health> {
   const installation = store.get<HookInstallation>('setting', 'hooks');
   if (!installation) return { ready: false, reason: 'Activity hooks are not installed. Run lastcall hooks install.' };
   for (const provider of ['claude', 'codex'] as const) {
@@ -131,6 +123,17 @@ export function activityHealth(config: Config, store: Store, now = Date.now()): 
     } catch (error) { return { ready: false, reason: `${provider}: Cannot verify hooks: ${errorMessage(error)}` }; }
     const seen = store.get<number>('hookSeen', provider);
     if (!seen || seen < installation.installedAt) return { ready: false, reason: `${provider}: Open a new native session and approve its hooks if prompted; no lifecycle event has been observed yet` };
+    if (provider === 'codex') {
+      try {
+        const cwds = [...new Set([homedir(), ...config.skills.filter(skill => skill.providers.includes('codex')).map(skill => skill.cwd)])];
+        const [features, hooks] = await codexRequests(config.providers.codex!.binary, [
+          { method: 'experimentalFeature/list', params: { limit: 1000 } },
+          { method: 'hooks/list', params: { cwds } },
+        ], { cwd: homedir() });
+        const reason = codexHookReason(features, hooks, { ...spec, path: realpathSync(spec.path), cwds });
+        if (reason) return { ready: false, reason };
+      } catch (error) { return { ready: false, reason: `codex: Cannot verify native hook enablement and trust: ${errorMessage(error)}` }; }
+    }
   }
   for (const activity of store.activities()) {
     if (activity.owned || !activity.busy || !activity.pid) continue;
@@ -138,4 +141,29 @@ export function activityHealth(config: Config, store: Store, now = Date.now()): 
     if (!identity || identity !== activity.processIdentity) store.put('activity', `${activity.provider}:${activity.sessionId}`, { ...activity, busy: false, lastAt: now });
   }
   return { ready: true };
+}
+
+/** Check effective native enablement and trust, without approving hooks for the user. */
+export function codexHookReason(features: unknown, hooks: unknown, spec: { path: string; command: string; events: string[]; cwds: string[] }): string | undefined {
+  // https://learn.chatgpt.com/docs/app-server (hooks/list, experimentalFeature/list)
+  const flags = z.object({ data: z.array(z.object({ name: z.string(), enabled: z.boolean() })), nextCursor: z.null() }).parse(features);
+  if (!flags.data.some(flag => flag.name === 'hooks' && flag.enabled)) return 'codex: Native activity hooks are disabled or unavailable';
+  const entries = z.object({ data: z.array(z.object({
+    cwd: z.string(), errors: z.array(z.unknown()), hooks: z.array(z.object({
+      eventName: z.string(), sourcePath: z.string(), handlerType: z.string(), command: z.string().optional(),
+      matcher: z.string().nullable(), async: z.boolean().optional(), enabled: z.boolean(), trustStatus: z.string(),
+    })),
+  })) }).parse(hooks).data;
+  for (const cwd of spec.cwds) {
+    const entry = entries.find(item => item.cwd === cwd);
+    if (!entry || entry.errors.length) return `codex: Cannot resolve native activity hooks in ${cwd}`;
+    for (const event of spec.events) {
+      const nativeEvent = event.charAt(0).toLowerCase() + event.slice(1);
+      if (!entry.hooks.some(hook => hook.eventName === nativeEvent && hook.sourcePath === spec.path && hook.handlerType === 'command' &&
+        hook.command === spec.command && hook.matcher === null && hook.async === false && hook.enabled && ['trusted', 'managed'].includes(hook.trustStatus))) {
+        return `codex: ${event} activity hook is disabled, modified, or untrusted in ${cwd}. Review /hooks in Codex.`;
+      }
+    }
+  }
+  return undefined;
 }

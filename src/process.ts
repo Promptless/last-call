@@ -21,10 +21,22 @@ export function processIdentity(pid: number): string | undefined {
 export function subscriptionEnv(home?: string, runId = 'probe'): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env, LASTCALL_OWNED: runId, ...(home ? { LASTCALL_HOME: home } : {}) };
   for (const key of Object.keys(env)) {
-    if (/^(OPENAI_API_KEY|OPENAI_BASE_URL|ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN|ANTHROPIC_BASE_URL|CLAUDE_CODE_OAUTH_TOKEN|CLAUDE_CODE_USE_|CLAUDECODE$|CODEX_API_KEY)/.test(key)) delete env[key];
+    if (/^(OPENAI_API_KEY|OPENAI_BASE_URL|ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN|ANTHROPIC_BASE_URL|ANTHROPIC_PROFILE|CLAUDE_CODE_OAUTH_TOKEN|CLAUDE_CODE_USE_|CLAUDECODE$|CODEX_API_KEY)/.test(key)) delete env[key];
   }
   return env;
 }
+
+// Settings can restore environment overrides after spawn. Apply the same guard
+// to auth checks and execution without changing the user's settings files.
+// https://code.claude.com/docs/en/authentication#authentication-precedence
+export const CLAUDE_SUBSCRIPTION_SETTINGS = {
+  forceLoginMethod: 'claudeai', apiKeyHelper: '',
+  env: {
+    ANTHROPIC_API_KEY: '', ANTHROPIC_AUTH_TOKEN: '', ANTHROPIC_PROFILE: '',
+    ANTHROPIC_BASE_URL: 'https://api.anthropic.com', CLAUDE_CODE_OAUTH_TOKEN: '',
+    CLAUDE_CODE_USE_BEDROCK: '0', CLAUDE_CODE_USE_VERTEX: '0', CLAUDE_CODE_USE_FOUNDRY: '0',
+  },
+};
 export interface Capture { stdout: string; stderr: string; code: number }
 export function capture(binary: string, args: string[], options: { env?: NodeJS.ProcessEnv; cwd?: string; timeout?: number } = {}): Promise<Capture> {
   return new Promise((resolveResult, reject) => {

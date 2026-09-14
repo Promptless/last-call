@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { chmodSync, existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { saveConfig } from '../src/files.js';
 import { finishRun, runWorker } from '../src/runner.js';
@@ -13,7 +13,7 @@ function setup() {
   writeFileSync(binary, `#!${process.execPath}
 const fs=require('node:fs');
 const args=process.argv.slice(2);
-if(args[0]==='auth') { const account=JSON.parse(fs.readFileSync(require('node:path').join(__dirname,'account.json'),'utf8')); console.log(JSON.stringify({loggedIn:true,authMethod:'claude.ai',apiProvider:'firstParty',email:account.email,orgName:account.organization})); process.exit(0); }
+if(args.includes('auth')) { fs.writeFileSync(require('node:path').join(__dirname,'auth-cwd.txt'),process.cwd()); fs.writeFileSync(require('node:path').join(__dirname,'auth-args.json'),JSON.stringify(args)); const account=JSON.parse(fs.readFileSync(require('node:path').join(__dirname,'account.json'),'utf8')); console.log(JSON.stringify({loggedIn:true,authMethod:'claude.ai',apiProvider:'firstParty',apiKeySource:account.apiKeySource??null,email:account.email,orgName:account.organization})); process.exit(0); }
 let input=''; process.stdin.on('data',s=>input+=s); process.stdin.on('end',()=>{
   const session=args[args.indexOf(args.includes('--resume')?'--resume':'--session-id')+1];
   const mode=fs.readFileSync('behavior.txt','utf8').trim();
@@ -42,6 +42,32 @@ let input=''; process.stdin.on('data',s=>input+=s); process.stdin.on('end',()=>{
 }
 afterEach(() => { for (const f of fixtures.splice(0)) { f.store.close(); rmSync(f.home, { recursive: true, force: true }); } });
 describe('native worker integration', () => {
+  it('checks authentication in the execution directory with the same subscription overrides', async () => {
+    const f = setup(); const cwd = join(f.home, 'project'); mkdirSync(cwd);
+    f.skill.cwd = cwd; f.config.skills = [f.skill]; saveConfig(f.home, f.config);
+    writeFileSync(join(cwd, 'behavior.txt'), 'complete');
+    f.store.put('run', 'run-1', run(f, {state:'launching',sessionId:undefined}));
+    await runWorker(f.home, 'run-1');
+    expect(readFileSync(join(f.home, 'auth-cwd.txt'),'utf8')).toBe(realpathSync(cwd));
+    expect(f.store.run('run-1').state).toBe('completed');
+    const authArgs: string[] = JSON.parse(readFileSync(join(f.home, 'auth-args.json'), 'utf8'));
+    const execution = JSON.parse(readFileSync(join(cwd, 'calls.jsonl'), 'utf8')) as { args: string[] };
+    expect(authArgs.indexOf('--settings')).toBeLessThan(authArgs.indexOf('auth'));
+    for (const args of [authArgs, execution.args]) {
+      expect(JSON.parse(args[args.indexOf('--settings') + 1]!)).toMatchObject({
+        forceLoginMethod: 'claudeai', apiKeyHelper: '',
+        env: { ANTHROPIC_API_KEY: '', ANTHROPIC_AUTH_TOKEN: '', ANTHROPIC_PROFILE: '', ANTHROPIC_BASE_URL: 'https://api.anthropic.com', CLAUDE_CODE_OAUTH_TOKEN: '', CLAUDE_CODE_USE_BEDROCK: '0', CLAUDE_CODE_USE_VERTEX: '0', CLAUDE_CODE_USE_FOUNDRY: '0' },
+      });
+    }
+  });
+  it('rejects an effective API key even when interactive auth reports a subscription', async () => {
+    const f = setup();
+    writeFileSync(join(f.home,'account.json'),JSON.stringify({email:'person@example.com',apiKeySource:'ANTHROPIC_API_KEY'}));
+    f.store.put('run','run-1',run(f,{state:'launching',sessionId:undefined}));
+    await runWorker(f.home,'run-1');
+    expect(f.store.run('run-1').state).toBe('failed'); expect(f.store.held()).toHaveLength(1);
+    expect(existsSync(join(f.home,'calls.jsonl'))).toBe(false);
+  });
   it('keeps the slot held if an empty-work marker cannot be committed', () => {
     const f = setup(); f.store.put('run', 'run-1', run(f, { state: 'running' }));
     f.store.db.exec("CREATE TRIGGER reject_empty_marker BEFORE INSERT ON records WHEN NEW.kind='empty' BEGIN SELECT RAISE(ABORT, 'empty marker unavailable'); END");
