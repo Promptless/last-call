@@ -1,0 +1,18 @@
+{
+  "id": "prospect-research",
+  "path": "/absolute/path/to/prospect-research/SKILL.md",
+  "cwd": "/absolute/path/to/research-workspace",
+  "prompt": "Use the configured prospect source. Produce one cited account brief for review.",
+  "providers": ["claude", "codex"],
+  "maxConcurrent": 2,
+  "spacingSeconds": 60,
+  "enabled": true,
+  "claude": {
+    "permissionMode": "dontAsk",
+    "allowedTools": ["Read", "Write", "WebFetch", "WebSearch"]
+  },
+  "codex": {
+    "sandbox": "workspace-write",
+    "networkAccess": true
+  }
+}

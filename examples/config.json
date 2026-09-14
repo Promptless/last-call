@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "slots": 3,
+  "runwayHours": 12,
+  "reservePercent": 5,
+  "idleSeconds": 300,
+  "notifications": true,
+  "keepAwake": false,
+  "providers": {},
+  "skills": []
+}
