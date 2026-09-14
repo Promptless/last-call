@@ -26,7 +26,7 @@ const home = (): string => resolve(String(program.opts().home));
 function output(value: unknown, human?: string): void { process.stdout.write((program.opts().json || !human ? JSON.stringify(value, null, 2) : human) + '\n'); }
 function withStore<T>(fn: (store: Store) => T): T { const store = new Store(home()); try { return fn(store); } finally { store.close(); } }
 function providerList(value: string): Provider[] { return z.array(ProviderSchema).min(1).parse(value.split(',').map(s => s.trim())); }
-function occupiedLine(run: Run): string { return `${run.id}  ${run.provider.padEnd(6)}  ${run.state.padEnd(13)}  ${run.skillId}\n  ${run.outcome?.summary ?? run.error ?? ''}${run.sessionId ? `\n  Native session: ${run.sessionId}` : ''}${run.outcome?.question ? `\n  Question: ${run.outcome.question}` : ''}${run.outcome?.artifacts.length ? `\n  ${run.outcome.artifacts.join('\n  ')}` : ''}`; }
+function occupiedLine(run: Run): string { return `${run.id}  ${run.provider.padEnd(6)}  ${run.state.padEnd(13)}  ${run.skillId}\n  ${run.error ?? run.outcome?.summary ?? ''}${run.sessionId ? `\n  Native session: ${run.sessionId}` : ''}${run.outcome?.question ? `\n  Question: ${run.outcome.question}` : ''}${run.outcome?.artifacts.length ? `\n  ${run.outcome.artifacts.join('\n  ')}` : ''}`; }
 
 async function questions<T>(fn: (ask: (question: string, defaultValue?: string) => Promise<string>) => Promise<T>): Promise<T> {
   if (!process.stdin.isTTY) throw new Error('Interactive input unavailable. Use --config/--file or ask the Last Call companion skill to configure the CLI.');
@@ -181,7 +181,10 @@ program.command('sprint').description('Start a one-off sprint with an explicit d
     const readings = await readQuotas(config, home());
     const sprint: ManualSprint = { id: randomUUID(), deadline, providers, resets: {} };
     for (const p of providers) { const q = readings[p]?.quota; if (!q) throw new Error(`${p}: Cannot bind manual sprint without a measured weekly period: ${readings[p]?.error}`); sprint.resets[p] = q.weekly.resetsAt; }
-    withStore(store => { store.put('setting', 'manual', sprint); store.put('setting', 'readings', readings); });
+    withStore(store => store.transaction(() => {
+      for (const provider of providers) store.put('setting', `manual:${provider}`, sprint);
+      store.put('setting', 'readings', readings);
+    }));
     output(sprint, `Manual sprint scheduled until ${new Date(deadline).toLocaleString()}. The enabled service will apply normal quota and activity gates.`);
   });
 
@@ -193,20 +196,30 @@ program.command('answer <id>').option('--text <answer>', 'user-authored response
   const answer = options.file ? readFileSync(resolve(String(options.file)), 'utf8') : String(options.text);
   if (!answer.trim()) throw new Error('Answer cannot be empty');
   withStore(store => {
-    const run = store.run(id);
-    if (!['needs_input', 'failed', 'uncertain'].includes(run.state) || !run.sessionId) throw new Error('This run has no resumable handoff; inspect its receipt');
-    if (run.state === 'uncertain' && !options.afterInspection) throw new Error('Runner ownership is uncertain. Inspect the native session for surviving work before using --after-inspection.');
-    if (run.workerPid && processIdentity(run.workerPid) === run.workerIdentity) throw new Error('The original worker is still alive. Inspect its native session before resuming.');
-    if (run.agentPid && processIdentity(run.agentPid) === run.agentIdentity) throw new Error('The native agent may still be executing. Inspect its session before resuming.');
-    output(store.updateRun(id, { state: 'answer_queued', answer, error: undefined }), 'Answer queued. The same session will resume when scheduling gates permit.');
+    const updated = store.transaction(() => {
+      const run = store.run(id);
+      if (!['needs_input', 'failed', 'uncertain'].includes(run.state) || !run.sessionId) throw new Error('This run has no resumable handoff; inspect its receipt');
+      if (run.state === 'uncertain' && !options.afterInspection) throw new Error('Runner ownership is uncertain. Inspect the native session for surviving work before using --after-inspection.');
+      if (run.workerPid && processIdentity(run.workerPid) === run.workerIdentity) throw new Error('The original worker is still alive. Inspect its native session before resuming.');
+      if (run.agentPid && processIdentity(run.agentPid) === run.agentIdentity) throw new Error('The native agent may still be executing. Inspect its session before resuming.');
+      const result: Run = { ...run, state: 'answer_queued', answer, error: undefined, updatedAt: Date.now() };
+      store.put('run', id, result);
+      return result;
+    });
+    output(updated, 'Answer queued. The same session will resume when scheduling gates permit.');
   });
 });
 program.command('release <id>').requiredOption('--reason <reason>', 'why this slot may be relinquished').action((id: string, options) => withStore(store => {
-  const run = store.run(id);
-  if (!HELD_STATES.includes(run.state)) throw new Error('This run does not occupy a slot');
-  if (['launching', 'running'].includes(run.state) || (run.workerPid && processIdentity(run.workerPid) === run.workerIdentity)) throw new Error('This run may still be executing. Let it finish or stop its native session before releasing its slot.');
-  if (run.agentPid && processIdentity(run.agentPid) === run.agentIdentity) throw new Error('The native agent may still be executing. Inspect its session before releasing the slot.');
-  output(store.updateRun(id, { state: 'released', error: `Released by user: ${String(options.reason)}` }), 'Slot released. This does not mark the external work item complete.');
+  const updated = store.transaction(() => {
+    const run = store.run(id);
+    if (!HELD_STATES.includes(run.state)) throw new Error('This run does not occupy a slot');
+    if (['launching', 'running'].includes(run.state) || (run.workerPid && processIdentity(run.workerPid) === run.workerIdentity)) throw new Error('This run may still be executing. Let it finish or stop its native session before releasing its slot.');
+    if (run.agentPid && processIdentity(run.agentPid) === run.agentIdentity) throw new Error('The native agent may still be executing. Inspect its session before releasing the slot.');
+    const result: Run = { ...run, state: 'released', error: `Released by user: ${String(options.reason)}`, updatedAt: Date.now() };
+    store.put('run', id, result);
+    return result;
+  });
+  output(updated, 'Slot released. This does not mark the external work item complete.');
 }));
 program.command('review <id>').requiredOption('--minutes <number>', 'human review time').requiredOption('--useful <yes|no>', 'whether the output was useful').action((id: string, options) => {
   const minutes = z.number().nonnegative().parse(Number(options.minutes)); const useful = z.enum(['yes', 'no']).parse(options.useful) === 'yes';

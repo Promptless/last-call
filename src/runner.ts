@@ -7,7 +7,7 @@ import { OutcomeSchema, type Outcome, type Provider, type Run } from './model.js
 import { atomicJson, errorMessage, loadConfig } from './files.js';
 import { findBinary, processIdentity, subscriptionEnv } from './process.js';
 import { Store } from './store.js';
-import { nativeAccount } from './providers.js';
+import { accountsMatch, nativeAccount } from './providers.js';
 
 export const RESULT_SCHEMA = {
   type: 'object', additionalProperties: false,
@@ -84,13 +84,16 @@ function tryOutcome(text: string): Outcome | undefined {
 }
 
 export function finishRun(store: Store, id: string, outcome: Outcome | undefined, quotaLimited: boolean, failure: string | undefined): void {
-  const run = store.run(id);
-  if (outcome && !failure) {
-    store.updateRun(id, { state: outcome.status, outcome, error: undefined, answer: undefined, agentPid: undefined, workerPid: undefined });
-    if (outcome.status === 'no_work') store.put('empty', `${run.skillId}:${run.sprintId}`, true);
-  } else {
-    store.updateRun(id, { state: quotaLimited && run.sessionId ? 'quota_wait' : 'failed', retryAfter: quotaLimited ? Date.now() + 5 * 60_000 : undefined, error: failure ?? 'Native session ended without a valid outcome. Inspect it before releasing or resuming this slot.', agentPid: undefined, workerPid: undefined });
-  }
+  store.transaction(() => {
+    const run = store.run(id);
+    const now = Date.now();
+    if (outcome && !failure) {
+      store.put('run', id, { ...run, state: outcome.status, outcome, error: undefined, answer: undefined, agentPid: undefined, workerPid: undefined, updatedAt: now });
+      if (outcome.status === 'no_work') store.put('empty', `${run.skillId}:${run.sprintId}`, true);
+    } else {
+      store.put('run', id, { ...run, state: quotaLimited && run.sessionId ? 'quota_wait' : 'failed', retryAfter: quotaLimited ? now + 5 * 60_000 : undefined, error: failure ?? 'Native session ended without a valid outcome. Inspect it before releasing or resuming this slot.', agentPid: undefined, workerPid: undefined, updatedAt: now });
+    }
+  });
 }
 
 /** Detached workers survive scheduler restarts and write their own durable receipts. */
@@ -106,10 +109,11 @@ export async function runWorker(home: string, id: string): Promise<void> {
       store.put('run', id, updated); return updated;
     });
     heartbeat = setInterval(() => store.updateRun(id, { heartbeatAt: Date.now() }), 5_000);
-    const selected = config.providers[run.provider]!;
+    const selected = config.providers[run.provider];
+    if (!selected || !accountsMatch(run.account, selected.account)) throw new Error('Configured account differs from the account that owns this run');
     const binary = findBinary(selected.binary);
     const account = await nativeAccount(run.provider, binary, home);
-    if (account.email.toLowerCase() !== selected.account.email.toLowerCase() || (selected.account.organization && account.organization !== selected.account.organization)) throw new Error('Native account changed before execution');
+    if (!accountsMatch(run.account, account)) throw new Error('Native account changed before execution');
     const directory = join(home, 'runs', id);
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     const schema = join(directory, 'result.schema.json'); atomicJson(schema, RESULT_SCHEMA);
@@ -120,8 +124,9 @@ export async function runWorker(home: string, id: string): Promise<void> {
     if (child.pid) store.updateRun(id, { agentPid: child.pid, agentIdentity: processIdentity(child.pid) });
     let outcome: Outcome | undefined;
     let quotaLimited = false;
+    let nonQuotaFailure = false;
     let failure: string | undefined;
-    child.stdin.on('error', error => { failure = `Could not deliver input to native runner: ${errorMessage(error)}`; });
+    child.stdin.on('error', error => { failure = `Could not deliver input to native runner: ${errorMessage(error)}`; nonQuotaFailure = true; });
     const lines = createInterface({ input: child.stdout });
     lines.on('line', line => {
       try {
@@ -132,16 +137,23 @@ export async function runWorker(home: string, id: string): Promise<void> {
         }
         if (event.outcome) outcome = event.outcome;
         if (event.quotaLimited) quotaLimited = true;
-        if (event.failure) failure = event.failure;
-      } catch (error) { failure = `Invalid native event: ${errorMessage(error)}`; }
+        if (event.failure) {
+          if (!nonQuotaFailure) failure = event.failure;
+          if (!event.quotaLimited) nonQuotaFailure = true;
+        }
+      } catch (error) { failure = `Invalid native event: ${errorMessage(error)}`; nonQuotaFailure = true; }
     });
     const completion = new Promise<void>(resolve => {
-      child.once('error', error => { failure = errorMessage(error); });
-      child.once('close', code => { if (code !== 0) failure ??= `Native runner exited with code ${code}`; resolve(); });
+      child.once('error', error => { failure = errorMessage(error); nonQuotaFailure = true; });
+      child.once('close', (code, signal) => {
+        if (signal) { failure = `Native runner exited after signal ${signal}`; nonQuotaFailure = true; }
+        else if (code !== 0) failure ??= `Native runner exited with code ${code}`;
+        resolve();
+      });
     });
     child.stdin.end(invocation(run));
     await completion;
-    finishRun(store, id, outcome, quotaLimited, failure);
+    finishRun(store, id, outcome, quotaLimited && !nonQuotaFailure, failure);
   } catch (error) {
     const run = store.get<Run>('run', id);
     if (run && ['running', 'launching'].includes(run.state) && (!run.workerPid || run.workerPid === process.pid)) store.updateRun(id, { state: 'failed', error: errorMessage(error), workerPid: undefined });

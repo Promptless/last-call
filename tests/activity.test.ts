@@ -39,6 +39,20 @@ describe('activity hooks', () => {
     recordActivity(f.store, 'claude', { session_id: 'owned', hook_event_name: 'SubagentStop', agent_id: 'child' }, false, NOW + 3);
     expect(f.store.activities().find(a => a.sessionId === 'child')!.busy).toBe(false);
   });
+  it('pauses when installed hooks are disabled or narrowed after a real event', () => {
+    const f = setup(); const roots = { claude: join(f.home, 'claude'), codex: join(f.home, 'codex') };
+    const install = installHooks(f.home, '/tmp/lastcall/dist/cli.js', ['claude', 'codex'], roots);
+    for (const provider of ['claude', 'codex'] as const) recordActivity(f.store, provider, { session_id: 'test', hook_event_name: 'SessionStart' }, false, install.installedAt + 1);
+    const path = install.providers.claude!.path;
+    const document = JSON.parse(readFileSync(path, 'utf8'));
+    atomicJson(path, { ...document, disableAllHooks: true });
+    expect(activityHealth(f.config, f.store).ready).toBe(false);
+    atomicJson(path, document);
+    expect(activityHealth(f.config, f.store).ready).toBe(true);
+    document.hooks.PreToolUse[0].matcher = 'Bash';
+    atomicJson(path, document);
+    expect(activityHealth(f.config, f.store).ready).toBe(false);
+  });
   it('keeps foreground turns busy until stop, failure or interrupt', () => {
     const f = setup();
     recordActivity(f.store, 'codex', { session_id: 'foreground', hook_event_name: 'UserPromptSubmit' }, false, NOW);

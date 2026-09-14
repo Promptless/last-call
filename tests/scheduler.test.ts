@@ -28,7 +28,7 @@ describe('closing windows and quota gates', () => {
   });
   it('opens a manual sprint outside the normal window and closes permanently at its deadline', () => {
     const f = setup(); const q = quota('claude', NOW + 20 * 3_600_000);
-    f.store.put('setting', 'manual', { id: 'manual', deadline: NOW + 1000, providers: ['claude'], resets: { claude: q.weekly.resetsAt } });
+    f.store.put('setting', 'manual:claude', { id: 'manual', deadline: NOW + 1000, providers: ['claude'], resets: { claude: q.weekly.resetsAt } });
     const decision = eligibility(f.config, { claude: { quota: q } }, { ready: true }, f.store, NOW);
     expect(decision.candidates).toHaveLength(1);
     const admitted = admit(f.store, f.config, decision.candidates, NOW)!;
@@ -38,6 +38,18 @@ describe('closing windows and quota gates', () => {
     const later = NOW + 10 * 3_600_000;
     q.updatedAt = later; q.fetchedAt = later; q.shortTerm!.resetsAt = later + 3_600_000;
     expect(eligibility(f.config, { claude: { quota: q } }, { ready: true }, f.store, later).candidates).toHaveLength(0);
+  });
+  it('preserves another provider’s manual cutoff when a new sprint selects one provider', () => {
+    const f = setup(); const claude = quota(); const codex = quota('codex');
+    const original = { id: 'original', deadline: NOW - 1000, providers: ['claude', 'codex'], resets: { claude: claude.weekly.resetsAt, codex: codex.weekly.resetsAt } };
+    f.store.put('setting', 'manual:claude', original);
+    f.store.put('setting', 'manual:codex', { id: 'replacement', deadline: NOW + 1000, providers: ['codex'], resets: { codex: codex.weekly.resetsAt } });
+
+    const decision = eligibility(f.config, { claude: { quota: claude }, codex: { quota: codex } }, { ready: true }, f.store, NOW);
+
+    expect(decision.candidates.map(candidate => candidate.provider)).toEqual(['codex']);
+    expect(decision.reasons).toContain('claude: Manual sprint deadline passed');
+    expect(admit(f.store, f.config, decision.candidates, NOW)?.provider).toBe('codex');
   });
   it('closes at reset without changing an active run', () => {
     const f = setup(); const q = quota();
@@ -111,6 +123,18 @@ describe('slots, activity, fairness, and handoffs', () => {
     const candidates = eligibility(f.config, { claude: { quota: quota() } }, { ready: true }, f.store, NOW).candidates;
     const resumed = admit(f.store, f.config, candidates, NOW)!;
     expect(resumed.sessionId).toBe('session-1'); expect(resumed.id).toBe('run-1'); expect(resumed.attempt).toBe(2); expect(f.store.held()).toHaveLength(1);
+  });
+  it('holds a queued answer when the provider is rebound to another native account', () => {
+    const f = setup(); f.config.slots = 1;
+    f.store.put('run', 'run-1', run(f, { state: 'answer_queued', answer: 'Continue this item.' }));
+    f.config.providers.claude!.account = { email: 'other@example.com' };
+    const reading = quota(); reading.account = f.config.providers.claude!.account;
+    const candidates = eligibility(f.config, { claude: { quota: reading } }, { ready: true }, f.store, NOW).candidates;
+
+    expect(candidates).toHaveLength(1);
+    expect(admit(f.store, f.config, candidates, NOW)).toBeUndefined();
+    expect(f.store.run('run-1').state).toBe('answer_queued');
+    expect(f.store.run('run-1').account.email).toBe('person@example.com');
   });
   it('no-work suspends repeat invocation, while malformed outcomes hold their slots', () => {
     const f = setup(); const candidates = eligibility(f.config, { claude: { quota: quota() } }, { ready: true }, f.store, NOW).candidates;

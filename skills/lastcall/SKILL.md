@@ -28,7 +28,8 @@ has requested unattended operation and configuration is ready.
 
 Ask for the skill, its working directory, invocation arguments, allowed
 providers, maximum simultaneous runs, launch spacing, and unattended permissions.
-Register it through `skill add --file` using the schema documented in the README.
+Set `enabled` to `false` in the registration JSON, then import it through
+`skill add --file` using the schema documented in the README.
 
 Run `skill check`, then perform its semantic review by reading the skill and
 relevant referenced instructions. Explain concrete problems found and the
@@ -45,6 +46,9 @@ Preserve approval gates. For preview or publishing skills, identify a useful
 review boundary and report required input there. Only modify another skill if
 the user's request includes that change. Flag separately billed tools or API
 calls made by a skill; Last Call manages native subscription allowance only.
+
+After resolving the review findings and confirming the user's unattended
+permissions, enable the registration with `skill enable <id>`.
 
 ## Operate and handle results
 

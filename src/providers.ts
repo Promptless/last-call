@@ -8,6 +8,11 @@ import { errorMessage } from './files.js';
 const object = z.record(z.string(), z.unknown());
 const nativeClaudeAccount = z.object({ loggedIn: z.literal(true), authMethod: z.literal('claude.ai'), apiProvider: z.literal('firstParty'), email: z.string().email(), orgName: z.string().optional() });
 
+/** Compare all account identity fields captured from a native subscription login. */
+export function accountsMatch(expected: Account, actual: Account): boolean {
+  return expected.email.toLowerCase() === actual.email.toLowerCase() && expected.organization === actual.organization;
+}
+
 /** Query the native account without reading or copying its credentials. */
 export async function nativeAccount(provider: Provider, binary: string, home?: string): Promise<Account> {
   if (provider === 'claude') {
@@ -60,6 +65,7 @@ const PayloadSchema = z.object({ provider: z.enum(['claude', 'codex']), source: 
 
 /** Normalize CodexBar's measured allowances, never its local cost estimates. */
 export function normalizeQuota(input: unknown, provider: Provider, expected: Account, now: number, verifiedNative?: Account): Quota {
+  if (verifiedNative && !accountsMatch(expected, verifiedNative)) throw new Error('Verified native account does not match the configured account');
   const rows: unknown[] = Array.isArray(input) ? input : [input];
   const parsed = rows.map(row => PayloadSchema.safeParse(row)).filter(result => result.success).map(result => result.data);
   const identityFor = (row: z.infer<typeof PayloadSchema>): string | undefined => row.usage.identity?.accountEmail ?? row.usage.accountEmail ?? (row.source === provider ? verifiedNative?.email : undefined);
@@ -70,7 +76,7 @@ export function normalizeQuota(input: unknown, provider: Provider, expected: Acc
   if (!['cli', 'codex-cli', 'claude-cli', 'local', provider].includes(row.source)) throw new Error(`Unexpected quota source: ${row.source}`);
   const identity = row.usage.identity ?? { accountEmail: row.usage.accountEmail, accountOrganization: row.usage.accountOrganization };
   const account = AccountSchema.parse({ email: identityFor(row), organization: identity.accountOrganization ?? verifiedNative?.organization });
-  if (expected.organization && account.organization !== expected.organization) throw new Error('Quota organization does not match native account');
+  if (!accountsMatch(expected, account)) throw new Error('Quota account or organization does not match native account');
   const convert = (w: z.infer<typeof WindowSchema>): Window => ({ ...w, resetsAt: Date.parse(w.resetsAt) });
   if (row.usage.secondary.windowMinutes !== 10080) throw new Error('Weekly window missing or unsupported');
   const optionalWindow = (w: z.infer<typeof OptionalWindowSchema> | null | undefined): Window | undefined => w?.resetsAt ? convert({ ...w, resetsAt: w.resetsAt }) : undefined;
@@ -84,14 +90,14 @@ export async function readQuota(config: Config, provider: Provider, home: string
   try {
     const binary = findBinary(selected.binary);
     const account = await nativeAccount(provider, binary, home);
-    if (account.email.toLowerCase() !== selected.account.email.toLowerCase() || (selected.account.organization && account.organization !== selected.account.organization)) throw new Error('Native login changed; update the configured account');
+    if (!accountsMatch(selected.account, account)) throw new Error('Native login changed; update the configured account');
     // Pin the helper to the exact executable whose native login is checked on both sides.
     // https://github.com/steipete/CodexBar/blob/v0.60.1/Sources/CodexBarCore/PathEnvironment.swift
     const env = { ...subscriptionEnv(home), [provider === 'claude' ? 'CLAUDE_CLI_PATH' : 'CODEX_CLI_PATH']: binary };
     const result = await capture(config.codexbar, ['usage', '--provider', provider, '--source', 'cli', '--format', 'json', '--json-only'], { env, timeout: 75_000 });
     if (result.code) throw new Error(`CodexBar could not fetch ${provider} quota (exit ${result.code}); run lastcall doctor`);
     const after = await nativeAccount(provider, binary, home);
-    if (after.email !== account.email || after.organization !== account.organization) throw new Error('Native login changed during quota measurement');
+    if (!accountsMatch(account, after)) throw new Error('Native login changed during quota measurement');
     return { quota: normalizeQuota(JSON.parse(result.stdout), provider, selected.account, Date.now(), after) };
   } catch (error) { return { error: errorMessage(error) }; }
 }

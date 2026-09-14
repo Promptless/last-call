@@ -19,5 +19,7 @@ export function quota(provider: Provider = 'claude', resetAt = NOW + 8 * 3_600_0
     shortTerm: { usedPercent: 20, resetsAt: NOW + 3_600_000, windowMinutes: 300 }, extra: [] };
 }
 export function run(f: ReturnType<typeof fixture>, changes: Partial<Run> = {}): Run {
-  return { id: 'run-1', provider: 'claude', skill: f.skill, skillId: f.skill.id, sprintId: `claude:${quota().weekly.resetsAt}`, createdAt: NOW, updatedAt: NOW, state: 'needs_input', sessionId: 'session-1', attempt: 1, ...changes };
+  const provider = changes.provider ?? 'claude';
+  const account = f.config.providers[provider]!.account;
+  return { id: 'run-1', provider, account: { ...account }, skill: f.skill, skillId: f.skill.id, sprintId: `claude:${quota().weekly.resetsAt}`, createdAt: NOW, updatedAt: NOW, state: 'needs_input', sessionId: 'session-1', attempt: 1, ...changes };
 }

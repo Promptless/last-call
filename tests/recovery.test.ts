@@ -3,12 +3,19 @@ import { rmSync } from 'node:fs';
 import { Store } from '../src/store.js';
 import { acquireLease, servicePlist } from '../src/macos.js';
 import { reconcileRuns, finishRun } from '../src/runner.js';
+import { statusSnapshot } from '../src/daemon.js';
 import { fixture, NOW, run } from './helpers.js';
 
 const fixtures: ReturnType<typeof fixture>[] = [];
 function setup() { const f = fixture(); fixtures.push(f); return f; }
 afterEach(() => { for (const f of fixtures.splice(0)) { f.store.close(); rmSync(f.home, { recursive: true, force: true }); } });
 describe('durable recovery', () => {
+  it('explains a failed scheduler tick in the readable status reasons', () => {
+    const f = setup();
+    f.store.put('setting', 'schedulerError', 'Configuration file is invalid');
+    const status = statusSnapshot(f.store, f.config, {}, NOW);
+    expect(status.reasons).toContain('Scheduler error: Configuration file is invalid');
+  });
   it('rejects duplicate schedulers and recovers a dead lease', () => {
     const f = setup(); const lease = acquireLease(f.store); expect(lease.pid).toBe(process.pid);
     const other = new Store(f.home);

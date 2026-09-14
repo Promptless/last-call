@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { chmodSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { saveConfig } from '../src/files.js';
-import { runWorker } from '../src/runner.js';
+import { finishRun, runWorker } from '../src/runner.js';
 import { admit, eligibility } from '../src/scheduler.js';
 import { fixture, NOW, quota, run } from './helpers.js';
 
@@ -13,7 +13,7 @@ function setup() {
   writeFileSync(binary, `#!${process.execPath}
 const fs=require('node:fs');
 const args=process.argv.slice(2);
-if(args[0]==='auth') { console.log(JSON.stringify({loggedIn:true,authMethod:'claude.ai',apiProvider:'firstParty',email:'person@example.com'})); process.exit(0); }
+if(args[0]==='auth') { const account=JSON.parse(fs.readFileSync(require('node:path').join(__dirname,'account.json'),'utf8')); console.log(JSON.stringify({loggedIn:true,authMethod:'claude.ai',apiProvider:'firstParty',email:account.email,orgName:account.organization})); process.exit(0); }
 let input=''; process.stdin.on('data',s=>input+=s); process.stdin.on('end',()=>{
   const session=args[args.indexOf(args.includes('--resume')?'--resume':'--session-id')+1];
   const mode=fs.readFileSync('behavior.txt','utf8').trim();
@@ -21,6 +21,12 @@ let input=''; process.stdin.on('data',s=>input+=s); process.stdin.on('end',()=>{
   console.log(JSON.stringify({type:'system',subtype:'init',session_id:session}));
   if(mode==='malformed') { console.log(JSON.stringify({type:'result',subtype:'success',structured_output:{status:'completed'}})); return; }
   if(mode==='rate-limit') { console.log(JSON.stringify({type:'error',error:{type:'rate_limit_error'}})); process.exitCode=1; return; }
+  if(mode==='rate-limit-then-malformed'||mode==='malformed-then-rate-limit'||mode==='rate-limit-then-failure') {
+    const limit={type:'error',error:{type:'rate_limit_error'}};
+    const invalid=mode==='rate-limit-then-failure'?{type:'result',subtype:'error_during_execution'}:{type:'result',subtype:'success',structured_output:{status:'completed'}};
+    for(const event of mode==='malformed-then-rate-limit'?[invalid,limit]:[limit,invalid]) console.log(JSON.stringify(event));
+    process.exitCode=1; return;
+  }
   const resume=args.includes('--resume');
   const status=mode==='handoff'&&!resume?'needs_input':'completed';
   if(status==='completed') fs.writeFileSync('artifact.md','Reviewed the selected account.');
@@ -28,6 +34,7 @@ let input=''; process.stdin.on('data',s=>input+=s); process.stdin.on('end',()=>{
 });
 `); chmodSync(binary, 0o700);
   f.config.providers.claude!.binary = binary;
+  writeFileSync(join(f.home, 'account.json'), JSON.stringify(f.config.providers.claude!.account));
   f.config.providers.codex = undefined;
   f.skill.providers = ['claude']; f.config.skills = [f.skill];
   saveConfig(f.home, f.config);
@@ -35,6 +42,13 @@ let input=''; process.stdin.on('data',s=>input+=s); process.stdin.on('end',()=>{
 }
 afterEach(() => { for (const f of fixtures.splice(0)) { f.store.close(); rmSync(f.home, { recursive: true, force: true }); } });
 describe('native worker integration', () => {
+  it('keeps the slot held if an empty-work marker cannot be committed', () => {
+    const f = setup(); f.store.put('run', 'run-1', run(f, { state: 'running' }));
+    f.store.db.exec("CREATE TRIGGER reject_empty_marker BEFORE INSERT ON records WHEN NEW.kind='empty' BEGIN SELECT RAISE(ABORT, 'empty marker unavailable'); END");
+    expect(() => finishRun(f.store, 'run-1', { status: 'no_work', summary: 'No items remain', question: null, workItem: null, artifacts: [] }, false, undefined)).toThrow(/empty marker unavailable/);
+    expect(f.store.run('run-1').state).toBe('running'); expect(f.store.held()).toHaveLength(1);
+    expect(f.store.all('empty')).toEqual([]);
+  });
   it('runs a real child process and writes a useful artifact receipt', async () => {
     const f = setup(); writeFileSync(join(f.home, 'behavior.txt'), 'complete');
     f.store.put('run', 'run-1', run(f, { state: 'launching', sessionId: undefined }));
@@ -60,5 +74,24 @@ describe('native worker integration', () => {
     writeFileSync(join(f.home, 'behavior.txt'), 'rate-limit');
     f.store.put('run', 'run-2', run(f, { id: 'run-2', state: 'launching', sessionId: undefined }));
     await runWorker(f.home, 'run-2'); expect(f.store.run('run-2').state).toBe('quota_wait'); expect(f.store.held()).toHaveLength(2);
+  });
+  it.each(['rate-limit-then-malformed', 'malformed-then-rate-limit', 'rate-limit-then-failure'])('holds unrelated failures for inspection in %s', async mode => {
+    const f = setup(); writeFileSync(join(f.home, 'behavior.txt'), mode);
+    f.store.put('run', 'run-1', run(f, { state: 'launching', sessionId: undefined }));
+    await runWorker(f.home, 'run-1');
+    const receipt = f.store.run('run-1');
+    expect(receipt.state).toBe('failed'); expect(receipt.retryAfter).toBeUndefined(); expect(f.store.held()).toHaveLength(1);
+    expect(receipt.error).toMatch(mode === 'rate-limit-then-failure' ? /error_during_execution/ : /Invalid native event/);
+  });
+  it('holds a saved session when configuration and native login have both moved to another account', async () => {
+    const f = setup(); writeFileSync(join(f.home, 'behavior.txt'), 'complete');
+    f.store.put('run', 'run-1', run(f, { state: 'launching' }));
+    const newAccount = { email: 'other@example.com' };
+    f.config.providers.claude!.account = newAccount;
+    saveConfig(f.home, f.config); writeFileSync(join(f.home, 'account.json'), JSON.stringify(newAccount));
+    await runWorker(f.home, 'run-1');
+    expect(f.store.run('run-1').state).toBe('failed');
+    expect(f.store.run('run-1').error).toMatch(/account that owns this run/);
+    expect(existsSync(join(f.home, 'calls.jsonl'))).toBe(false);
   });
 });

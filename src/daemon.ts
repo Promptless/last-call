@@ -26,6 +26,8 @@ export function statusSnapshot(store: Store, config: Config, readings: Partial<R
   const decision = eligibility(config, readings, health, store, now);
   const held = store.held();
   const reasons = [...decision.reasons];
+  const schedulerError = store.get<string>('setting', 'schedulerError');
+  if (schedulerError) reasons.unshift(`Scheduler error: ${schedulerError}`);
   const lease = store.get<{pid: number; identity: string}>('setting', 'lease');
   const running = !!lease && processIdentity(lease.pid) === lease.identity;
   if (!running) reasons.unshift('Scheduler is not running. Enable it with lastcall service enable.');

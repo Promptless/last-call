@@ -121,10 +121,12 @@ export function activityHealth(config: Config, store: Store, now = Date.now()): 
     if (!spec) return { ready: false, reason: `${provider}: Activity hooks are missing` };
     try {
       const document = RecordSchema.parse(JSON.parse(readFileSync(spec.path, 'utf8')));
+      // https://code.claude.com/docs/en/hooks#disable-or-remove-hooks
+      if (provider === 'claude' && document.disableAllHooks === true) return { ready: false, reason: 'claude: Activity hooks are disabled by disableAllHooks' };
       const hooks = RecordSchema.parse(document.hooks);
       for (const event of spec.events) {
         const groups = z.array(RecordSchema).parse(hooks[event]);
-        if (!groups.some(group => z.array(RecordSchema).parse(group.hooks).some(handler => handler.command === spec.command))) return { ready: false, reason: `${provider}: Activity hooks were changed or removed` };
+        if (!groups.some(group => group.matcher === undefined && z.array(RecordSchema).parse(group.hooks).some(handler => handler.type === 'command' && handler.command === spec.command && handler.if === undefined && handler.async !== true))) return { ready: false, reason: `${provider}: Activity hooks were changed or removed` };
       }
     } catch (error) { return { ready: false, reason: `${provider}: Cannot verify hooks: ${errorMessage(error)}` }; }
     const seen = store.get<number>('hookSeen', provider);

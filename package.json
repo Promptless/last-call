@@ -4,9 +4,29 @@
   "description": "Your AI quota is expiring. Put it to work.",
   "type": "module",
   "license": "MIT",
-  "engines": { "node": ">=22.16.0" },
-  "bin": { "lastcall": "dist/cli.js" },
-  "files": ["dist", "skills", "examples", "licenses", "docs/release.md", "README.md", "LICENSE"],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Promptless/last-call.git"
+  },
+  "homepage": "https://github.com/Promptless/last-call#readme",
+  "bugs": {
+    "url": "https://github.com/Promptless/last-call/issues"
+  },
+  "engines": {
+    "node": ">=22.16.0"
+  },
+  "bin": {
+    "lastcall": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "skills",
+    "examples",
+    "licenses",
+    "docs/release.md",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
@@ -14,6 +34,13 @@
     "check": "npm run typecheck && npm test",
     "prepack": "npm run build"
   },
-  "dependencies": { "commander": "^14.0.0", "zod": "^4.0.0" },
-  "devDependencies": { "@types/node": "^22.0.0", "typescript": "^5.9.0", "vitest": "^3.2.0" }
+  "dependencies": {
+    "commander": "^14.0.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.9.0",
+    "vitest": "^5.0.0"
+  }
 }

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { type Config, type Health, type ManualSprint, type Provider, type Quota, type QuotaReading, type Run, type Skill, type Sprint } from './model.js';
 import { Store } from './store.js';
+import { accountsMatch } from './providers.js';
 
 export interface Candidate { provider: Provider; quota: Quota; sprint: Sprint }
 export interface Decision { candidates: Candidate[]; reasons: string[] }
@@ -9,8 +10,7 @@ export function samePeriod(left: number, right: number): boolean { return Math.a
 
 export function quotaReason(quota: Quota, config: Config, now: number): string | undefined {
   const expected = config.providers[quota.provider]?.account;
-  if (!expected || expected.email.toLowerCase() !== quota.account.email.toLowerCase() ||
-      (expected.organization && expected.organization !== quota.account.organization)) return 'Account does not match the configured native account';
+  if (!expected || !accountsMatch(expected, quota.account)) return 'Account does not match the configured native account';
   if (now - quota.updatedAt > config.quotaMaxAgeSeconds * 1000 || quota.updatedAt > now + 30_000 || now - quota.fetchedAt > config.quotaMaxAgeSeconds * 1000) return 'Quota snapshot is stale';
   if (quota.weekly.resetsAt <= now) return 'Waiting for a fresh weekly period';
   if (100 - quota.weekly.usedPercent <= config.reservePercent) return 'Weekly reserve reached';
@@ -24,9 +24,9 @@ export function quotaReason(quota: Quota, config: Config, now: number): string |
 export function eligibility(config: Config, readings: Partial<Record<Provider, QuotaReading>>, health: Health, store: Store, now: number): Decision {
   const reasons: string[] = [];
   const candidates: Candidate[] = [];
-  const manual = store.get<ManualSprint>('setting', 'manual');
   for (const provider of ['claude', 'codex'] as const) {
     if (!config.providers[provider]) continue;
+    const manual = store.get<ManualSprint>('setting', `manual:${provider}`);
     const reading = readings[provider];
     const quota = reading?.quota;
     if (!quota) { reasons.push(`${provider}: ${reading?.error ?? 'Quota unavailable'}`); continue; }
@@ -70,7 +70,7 @@ export function admit(store: Store, config: Config, candidates: Candidate[], now
     for (const run of held) {
       if (!['answer_queued', 'quota_wait'].includes(run.state) || !run.sessionId) continue;
       if (run.retryAfter !== undefined && now < run.retryAfter) continue;
-      const candidate = eligible.find(c => c.provider === run.provider);
+      const candidate = eligible.find(c => c.provider === run.provider && accountsMatch(run.account, c.quota.account));
       if (!candidate || !config.skills.some(s => s.id === run.skillId && s.enabled)) continue;
       const resumed: Run = { ...run, state: 'launching', attempt: run.attempt + 1, updatedAt: now, retryAfter: undefined, workerPid: undefined, workerIdentity: undefined, agentPid: undefined, agentIdentity: undefined, heartbeatAt: undefined };
       store.put('run', run.id, resumed); return resumed;
@@ -87,7 +87,7 @@ export function admit(store: Store, config: Config, candidates: Candidate[], now
       const available = eligible.filter(c => !store.get<boolean>('empty', `${skill.id}:${c.sprint.id}`));
       const selected = selectProvider(skill, available);
       if (!selected) continue;
-      const run: Run = { id: randomUUID(), skillId: skill.id, skill, provider: selected.provider, sprintId: selected.sprint.id, state: 'launching', createdAt: now, updatedAt: now, attempt: 1 };
+      const run: Run = { id: randomUUID(), skillId: skill.id, skill, provider: selected.provider, account: selected.quota.account, sprintId: selected.sprint.id, state: 'launching', createdAt: now, updatedAt: now, attempt: 1 };
       store.put('sprint', selected.sprint.id, selected.sprint);
       store.put('run', run.id, run);
       store.put('launch', skill.id, now);

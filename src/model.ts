@@ -52,7 +52,7 @@ export type Outcome = z.infer<typeof OutcomeSchema>;
 export type RunState = 'launching' | 'running' | 'needs_input' | 'answer_queued' | 'quota_wait' | 'failed' | 'uncertain' | 'completed' | 'no_work' | 'released';
 export const HELD_STATES: RunState[] = ['launching', 'running', 'needs_input', 'answer_queued', 'quota_wait', 'failed', 'uncertain'];
 export interface Run {
-  id: string; skillId: string; provider: Provider; skill: Skill; sprintId: string;
+  id: string; skillId: string; provider: Provider; account: Account; skill: Skill; sprintId: string;
   state: RunState; createdAt: number; updatedAt: number; attempt: number;
   sessionId?: string; workerPid?: number; workerIdentity?: string; agentPid?: number; agentIdentity?: string; heartbeatAt?: number;
   outcome?: Outcome; error?: string; answer?: string; retryAfter?: number; reviewMinutes?: number; useful?: boolean;

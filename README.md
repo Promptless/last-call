@@ -13,10 +13,13 @@ handles one item, and your skill keeps control of its backlog.
 ## Install from source
 
 Requires macOS, Node.js 22.16 or newer, and a signed-in Claude Code or Codex CLI.
+Claude Code requires version 2.1.259 or newer for unattended permission prompts.
 Both providers are supported; install either or both. Node 22 reports its built-in
 SQLite module as experimental.
 
 ```sh
+git clone https://github.com/Promptless/last-call.git
+cd last-call
 npm ci
 npm run check
 npm install --global .
@@ -73,6 +76,8 @@ and optional `model`. Codex settings include `sandbox`, `networkAccess`, and
 optional native `profile` and `model`. Native permission systems remain the
 enforcement mechanism; an allowlist does not remove permissions already granted
 by the user's native configuration. Review the effective configuration.
+Each run retains the permission settings captured when it starts. Disable its
+skill to prevent held sessions from resuming.
 
 The CLI checks paths and configuration and flags common concerns. Its companion
 agent reads the skill to assess claiming, completion, approval gates, tools,
@@ -136,7 +141,8 @@ not estimated token costs. Missing, stale, or mismatched quota pauses that
 provider. A probe failure is shown by `doctor` and `status`. When native CLI
 quota output omits identity, Last Call pins the helper to the configured native
 executable and verifies that executable's login both before and after the
-measurement. The receipt labels this identity basis explicitly. An unused
+measurement. Quota snapshots in `doctor` and JSON status label this identity
+basis explicitly. An unused
 short-term window can omit its reset time; a used window cannot.
 
 The CLI uses subscription authentication and removes inherited API credential

@@ -1,12 +1,13 @@
 # Validation record
 
-Checked locally on macOS with Node.js 22.22.0, Claude Code 2.1.270,
-Codex CLI 0.153.0, and CodexBar CLI 0.60.1.
+Native smoke checks ran on macOS with Node.js 22.22.0, Claude Code 2.1.270,
+Codex CLI 0.153.0, and CodexBar CLI 0.60.1. The automated suite also passes
+with Node.js 24.4.1.
 
 ## Completed
 
 - TypeScript type checking and production compilation pass.
-- 35 automated tests pass across scheduling, quotas, native event contracts,
+- 49 automated tests pass across scheduling, quotas, native event contracts,
   hooks, CLI operations, durable recovery, and actual child-process execution.
 - Both native subscription account checks work.
 - Both real providers returned measured weekly quota. Codex supplied identity
@@ -29,6 +30,8 @@ part of the source distribution or npm package.
 
 ## Release checks still open
 
+- Automated Codex child-process regression coverage for account handshake,
+  same-session continuation, and failures after a valid-looking outcome.
 - A real prospect brief reviewed for usefulness and citation quality.
 - Starport preview preparation in an authorized isolated checkout, reviewed
   through its existing human approval boundary.

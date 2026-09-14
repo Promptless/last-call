@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { normalizeQuota } from '../src/providers.js';
+import { accountsMatch, normalizeQuota } from '../src/providers.js';
 import { parseEvent, runnerArgs } from '../src/runner.js';
 import { subscriptionEnv } from '../src/process.js';
 import { NOW, fixture, run } from './helpers.js';
@@ -7,6 +7,14 @@ import { rmSync } from 'node:fs';
 
 function payload() { return { provider: 'claude', source: 'cli', usage: { primary: { usedPercent: 50, windowMinutes: 300, resetsAt: '2026-09-14T09:00:00Z' }, secondary: { usedPercent: 20, windowMinutes: 10080, resetsAt: '2026-09-15T08:00:00Z' }, tertiary: null, updatedAt: '2026-09-14T08:00:00Z', identity: { accountEmail: 'person@example.com', accountOrganization: null } } }; }
 describe('provider contracts', () => {
+  it('pins both email and organization while treating email case consistently', () => {
+    const account = { email: 'person@example.com', organization: 'Team' };
+    expect(accountsMatch(account, { ...account, email: 'Person@Example.com' })).toBe(true);
+    expect(accountsMatch(account, { ...account, email: 'other@example.com' })).toBe(false);
+    expect(accountsMatch(account, { ...account, organization: 'Other team' })).toBe(false);
+    expect(accountsMatch(account, { email: account.email })).toBe(false);
+    expect(accountsMatch({ email: account.email }, account)).toBe(false);
+  });
   it('normalizes exact-account snapshots and rejects missing or ambiguous identity', () => {
     const row = payload(); const account = { email: 'person@example.com' };
     expect(normalizeQuota([row], 'claude', account, NOW).weekly.usedPercent).toBe(20);
@@ -29,6 +37,14 @@ describe('provider contracts', () => {
     expect(q.identityBasis).toBe('verified-native-cli'); expect(q.account).toEqual(account); expect(q.shortTerm).toBeUndefined();
     row.usage.primary.usedPercent = 10;
     expect(() => normalizeQuota(row, 'claude', account, NOW, account)).toThrow();
+  });
+  it('rejects native and snapshot organization changes even when the account had no organization', () => {
+    const account = { email: 'person@example.com' };
+    const row = payload();
+    expect(() => normalizeQuota(row, 'claude', account, NOW, { ...account, organization: 'Team' })).toThrow(/native account/);
+    const organizationSnapshot = { ...row, usage: { ...row.usage, identity: { ...row.usage.identity, accountOrganization: 'Team' } } };
+    expect(() => normalizeQuota(organizationSnapshot, 'claude', account, NOW, account)).toThrow(/organization/);
+    expect(() => normalizeQuota(row, 'claude', account, NOW, { email: 'other@example.com' })).toThrow(/native account/);
   });
   it('recognizes native sessions and structured outcomes without treating prose as a quota retry', () => {
     const outcome = { status: 'needs_input', summary: 'Prepared a preview', question: 'Approve publishing?', workItem: 'account:example', artifacts: ['/tmp/preview.html'] };
