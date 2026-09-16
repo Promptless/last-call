@@ -7,8 +7,9 @@ near your weekly reset, using your existing subscription allowance to work
 through tasks you already wanted done.
 
 The default is a **12-hour runway and 5% weekly reserve**. If you start working
-in Claude Code or Codex, new launches pause. Running agents finish. Each agent
-handles one item, and your skill keeps control of its backlog.
+in Claude Code or Codex, new launches pause for both providers. Running agents
+finish. Each agent handles one item, and your skill keeps control of its
+backlog.
 
 ## Install from source
 
@@ -97,6 +98,7 @@ lastcall config set runwayHours 12
 lastcall config set reservePercent 5
 lastcall config set slots 3
 lastcall config set keepAwake true
+lastcall config set foregroundScope provider
 lastcall sprint --until 2026-09-14T21:00:00-07:00
 lastcall runs
 lastcall runs RUN_ID
@@ -117,6 +119,14 @@ on the same skill. Repeated problems fill the available slots and stop further
 launches. Answers continue the same native session when gates permit. Release
 relinquishes a slot without marking the external work complete. It refuses to
 release a run that may still be executing.
+
+`foregroundScope` decides how wide the foreground pause reaches. The default
+`any` pauses every provider whenever either native agent is active, which is
+what you want when the concern is your machine and working tree: an agent
+editing files under you is equally disruptive whichever tool you are sitting
+in. Setting it to `provider` pauses only the provider you are using, so working
+in Claude does not hold an expiring Codex allowance idle. Sessions Last Call
+owns are excluded either way, so its own agents never pause it.
 
 Short-term or model limits pause admission until measured capacity returns.
 They do not start sprints. With both providers allowed, Last Call selects the

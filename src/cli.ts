@@ -112,10 +112,10 @@ program.command('init').description('Configure accounts, skills, and closing-tim
 
 const configCommand = program.command('config').description('Inspect or edit scheduling preferences');
 configCommand.command('show').action(() => output(loadConfig(home())));
-configCommand.command('set <key> <value>').description('Set slots, runwayHours, reservePercent, idleSeconds, pollSeconds, notifications, or keepAwake').action((key: string, value: string) => {
-  const allowed = ['slots', 'runwayHours', 'reservePercent', 'idleSeconds', 'pollSeconds', 'quotaMaxAgeSeconds', 'notifications', 'keepAwake', 'codexbar'];
+configCommand.command('set <key> <value>').description('Set slots, runwayHours, reservePercent, idleSeconds, foregroundScope, pollSeconds, notifications, or keepAwake').action((key: string, value: string) => {
+  const allowed = ['slots', 'runwayHours', 'reservePercent', 'idleSeconds', 'pollSeconds', 'quotaMaxAgeSeconds', 'notifications', 'keepAwake', 'codexbar', 'foregroundScope'];
   if (!allowed.includes(key)) throw new Error(`Editable preferences: ${allowed.join(', ')}`);
-  const parsed = key === 'codexbar' ? value : JSON.parse(value) as unknown;
+  const parsed = ['codexbar', 'foregroundScope'].includes(key) ? value : JSON.parse(value) as unknown;
   const config = ConfigSchema.parse({ ...loadConfig(home()), [key]: parsed }); saveConfig(home(), config); output(config);
 });
 

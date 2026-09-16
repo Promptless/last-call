@@ -20,6 +20,25 @@ export function quotaReason(quota: Quota, config: Config, now: number): string |
   return undefined;
 }
 
+/**
+ * Why a provider is paused for foreground activity, or undefined when it may launch.
+ *
+ * `foregroundScope: 'any'` (the default) pauses every provider whenever either native agent is
+ * active — right when the concern is the machine and the working tree, which one agent disrupts
+ * regardless of which one you are sitting in. `'provider'` pauses only the provider in use, so
+ * working in Claude does not hold an expiring Codex allowance idle. Sessions Last Call owns are
+ * excluded either way, so its own agents never pause it.
+ */
+export function foregroundReason(store: Store, config: Config, provider: Provider, now: number): string | undefined {
+  const scoped = config.foregroundScope === 'provider';
+  const activity = store.activities().filter(a => !a.owned && (!scoped || a.provider === provider));
+  const label = scoped ? `${provider}: ` : '';
+  if (activity.some(a => a.busy)) return `${label}Foreground agent is active`;
+  const lastAt = Math.max(0, ...activity.map(a => a.lastAt));
+  if (lastAt && now - lastAt < config.idleSeconds * 1000) return `${label}Waiting for the foreground idle delay`;
+  return undefined;
+}
+
 /** Compute eligibility without launching a process or spending quota. */
 export function eligibility(config: Config, readings: Partial<Record<Provider, QuotaReading>>, health: Health, store: Store, now: number): Decision {
   const reasons: string[] = [];
@@ -45,12 +64,14 @@ export function eligibility(config: Config, readings: Partial<Record<Provider, Q
     candidates.push({ provider, quota, sprint });
   }
   if (!health.ready) return { candidates: [], reasons: [...reasons, health.reason ?? 'Activity detection is not ready'] };
-  const activity = store.activities().filter(a => !a.owned);
-  if (activity.some(a => a.busy)) return { candidates: [], reasons: [...reasons, 'Foreground agent is active'] };
-  const lastAt = Math.max(0, ...activity.map(a => a.lastAt));
-  if (lastAt && now - lastAt < config.idleSeconds * 1000) return { candidates: [], reasons: [...reasons, 'Waiting for the foreground idle delay'] };
+  const quiet: Candidate[] = [];
+  for (const candidate of candidates) {
+    const paused = foregroundReason(store, config, candidate.provider, now);
+    if (!paused) { quiet.push(candidate); continue; }
+    if (!reasons.includes(paused)) reasons.push(paused);
+  }
   if (!config.skills.some(s => s.enabled)) reasons.push('No enabled skills');
-  return { candidates, reasons };
+  return { candidates: quiet, reasons };
 }
 
 export function selectProvider(skill: Skill, candidates: Candidate[]): Candidate | undefined {
@@ -63,9 +84,7 @@ export function selectProvider(skill: Skill, candidates: Candidate[]): Candidate
 /** Admit at most one invocation per poll, making spacing and quota rechecks effective. */
 export function admit(store: Store, config: Config, candidates: Candidate[], now: number): Run | undefined {
   return store.transaction(() => {
-    const activity = store.activities().filter(a => !a.owned);
-    if (activity.some(a => a.busy || now - a.lastAt < config.idleSeconds * 1000)) return undefined;
-    const eligible = candidates.filter(c => c.sprint.deadline > now && !quotaReason(c.quota, config, now) && store.get<Sprint>('sprint', c.sprint.id)?.closedAt === undefined);
+    const eligible = candidates.filter(c => c.sprint.deadline > now && !quotaReason(c.quota, config, now) && store.get<Sprint>('sprint', c.sprint.id)?.closedAt === undefined && !foregroundReason(store, config, c.provider, now));
     const held = store.held();
     for (const run of held) {
       if (!['answer_queued', 'quota_wait'].includes(run.state) || !run.sessionId) continue;
