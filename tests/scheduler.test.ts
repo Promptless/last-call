@@ -90,6 +90,32 @@ describe('slots, activity, fairness, and handoffs', () => {
     expect(eligibility(f.config, reading, { ready: true }, f.store, NOW).candidates).toHaveLength(1);
     expect(eligibility(f.config, reading, { ready: false, reason: 'hooks missing' }, f.store, NOW).candidates).toHaveLength(0);
   });
+  it('pauses only the busy provider under foregroundScope provider, leaving the other free to launch', () => {
+    const f = setup(); f.config.foregroundScope = 'provider';
+    const reading = { claude: { quota: quota('claude') }, codex: { quota: quota('codex') } };
+    f.store.put('activity', 'claude-foreground', { provider: 'claude', sessionId: 'claude-foreground', owned: false, busy: true, lastAt: NOW });
+    const decision = eligibility(f.config, reading, { ready: true }, f.store, NOW);
+    expect(decision.candidates.map(c => c.provider)).toEqual(['codex']);
+    expect(decision.reasons).toContain('claude: Foreground agent is active');
+    expect(admit(f.store, f.config, decision.candidates, NOW)?.provider).toBe('codex');
+  });
+  it('applies the idle delay per provider under foregroundScope provider', () => {
+    const f = setup(); f.config.foregroundScope = 'provider';
+    const reading = { claude: { quota: quota('claude') }, codex: { quota: quota('codex') } };
+    f.store.put('activity', 'codex-recent', { provider: 'codex', sessionId: 'codex-recent', owned: false, busy: false, lastAt: NOW - 60_000 });
+    const decision = eligibility(f.config, reading, { ready: true }, f.store, NOW);
+    expect(decision.candidates.map(c => c.provider)).toEqual(['claude']);
+    expect(decision.reasons).toContain('codex: Waiting for the foreground idle delay');
+  });
+  it('defaults to foregroundScope any, pausing both providers and reporting it once', () => {
+    const f = setup(); const reading = { claude: { quota: quota('claude') }, codex: { quota: quota('codex') } };
+    expect(f.config.foregroundScope).toBe('any');
+    f.store.put('activity', 'claude-foreground', { provider: 'claude', sessionId: 'claude-foreground', owned: false, busy: true, lastAt: NOW });
+    const decision = eligibility(f.config, reading, { ready: true }, f.store, NOW);
+    expect(decision.candidates).toHaveLength(0);
+    expect(decision.reasons.filter(r => r === 'Foreground agent is active')).toHaveLength(1);
+    expect(admit(f.store, f.config, decision.candidates, NOW)).toBeUndefined();
+  });
   it('holds input-blocked slots, permits peers, and stops when repeated problems fill capacity', () => {
     const f = setup(); f.config.slots = 2;
     f.store.put('run', 'run-1', run(f));

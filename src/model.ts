@@ -29,6 +29,8 @@ export const ConfigSchema = z.object({
   runwayHours: z.number().positive().max(168).default(12),
   reservePercent: z.number().min(0).max(100).default(5),
   idleSeconds: z.number().nonnegative().default(300),
+  /** 'any' pauses every provider when either native agent is active; 'provider' pauses only the one in use. */
+  foregroundScope: z.enum(['any', 'provider']).default('any'),
   pollSeconds: z.number().min(10).default(60),
   quotaMaxAgeSeconds: z.number().min(10).default(120),
   notifications: z.boolean().default(true), keepAwake: z.boolean().default(false),
